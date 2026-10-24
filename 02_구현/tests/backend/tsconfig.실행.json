@@ -1,0 +1,1 @@
+{"extends":"./tsconfig.json","compilerOptions":{"noEmit":false,"allowImportingTsExtensions":false,"rootDir":"../../src","outDir":"../../실행데이터/B1/컴파일","module":"NodeNext","moduleResolution":"NodeNext"},"include":["../../src/backend/**/*.ts","../../src/shared/**/*.ts"]}

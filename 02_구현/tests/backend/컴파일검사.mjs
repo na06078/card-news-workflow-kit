@@ -1,0 +1,2 @@
+import assert from 'node:assert/strict';import {resolve}from'node:path';import {randomUUID}from'node:crypto';
+const {createStore}=await import('../../실행데이터/B1/컴파일/backend/저장소.js');const dataDir=resolve('실행데이터/B1',randomUUID());const s=await createStore({dataDir,dbPath:resolve(dataDir,'컴파일.sqlite'),dataMode:'mock'});try{const c=await s.createProject({createRequestId:randomUUID(),topic:'컴파일한 실제 모듈 검사'});assert.equal(c.status,201);console.log('COMPILED_BACKEND_OK');}finally{await s.close();}

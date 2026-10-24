@@ -1,0 +1,15 @@
+import {test,expect,vi} from 'vitest';
+import {createOfflineClaudeAdapter,type QueryFactory} from '../../src/providers/클로드.js';
+import {createMockSnapshot} from '../../src/shared/모의자료.js';
+import type {EngineEvent,EventDraft,ProviderBridge,EngineContext,CardLayout} from '../../src/shared/포트.js';
+import type {SDKMessage} from '@anthropic-ai/claude-agent-sdk';
+const layout:CardLayout={fontScale:'small',textAlign:'center',placement:'top'};
+for(const mode of ['valid','absent','noop','content','injection','text_removes_layout'] as const)test(`OFFLINE G1 layout 출력 ${mode} 검증과 안전한 prompt 계약`,async()=>{
+ const snapshot=createMockSnapshot('review');const card=snapshot.result!.cards[0];card.state='pending';card.approvedRevision=null;card.previewAssetId=null;if(mode==='text_removes_layout')card.layout=layout;
+ const request={cardIds:[card.cardId],scope:mode==='text_removes_layout'?'text' as const:'layout' as const,instruction:'글자를 작게 가운데 위에 배치',requestId:snapshot.projectId,version:snapshot.result!.version};
+ const next={...card,...(mode==='absent'?{}:{layout:mode==='noop'?{fontScale:'normal',textAlign:'left',placement:'bottom'}:mode==='injection'?{...layout,css:'x'}:layout}),...(mode==='content'?{title:'금지 변경'}:{})};if(mode==='text_removes_layout')delete next.layout;
+ const context:EngineContext={projectId:snapshot.projectId,runId:snapshot.lastRun!.runId,attempt:1,engine:'claude-agent-sdk',engineSessionId:null,cwd:process.cwd(),phase:'revision',baseProjectVersion:snapshot.projectVersion};let seq=0;const event=(draft:EventDraft):EngineEvent=>({...draft,seq:++seq,at:new Date().toISOString(),projectId:context.projectId,runId:context.runId,attempt:1});
+ const bridge:ProviderBridge={progress:async(_c,e)=>event(e),openQuestion:vi.fn(),waitForAnswer:vi.fn(),publishResult:vi.fn(async()=>event({type:'result',kind:'cards',version:1})),publishError:async(_c,error)=>event({type:'error',error}),saveSession:async()=>{},status:vi.fn()};let prompt='';
+ const query:QueryFactory=({prompt:p})=>Object.assign((async function*(){if(typeof p!=='string')for await(const m of p)prompt+=m.message.content;yield {type:'system',subtype:'init',session_id:'test-session',cwd:process.cwd(),tools:['WebSearch','WebFetch','AskUserQuestion'],mcp_servers:[],permissionMode:'default',apiKeySource:'none'} as unknown as SDKMessage;yield {type:'result',subtype:'success',session_id:'test-session',is_error:false,permission_denials:[],structured_output:{kind:'cards',cards:[next],factsCheck:'pending',visualCheck:'pending'}} as unknown as SDKMessage;})(),{close(){}});
+ const a=createOfflineClaudeAdapter({bridge,livePermission:{inference:false,search:false,image:false}},query);try{const events:EngineEvent[]=[];for await(const e of a.start(context,{snapshot,request}))events.push(e);if(mode==='valid'){expect(events.at(-1)?.type).toBe('result');expect(bridge.publishResult).toHaveBeenCalledOnce();expect(prompt).toContain('fontScale');expect(prompt).toContain('지원 범위 밖');}else{expect(events.at(-1)).toMatchObject({type:'error',error:{code:'PROVIDER_PROTOCOL_ERROR'}});expect(bridge.publishResult).not.toHaveBeenCalled();}}finally{await a.dispose();}
+});

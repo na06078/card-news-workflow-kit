@@ -1,0 +1,2 @@
+import {test,expect}from'vitest';import {DomainError}from'../../src/backend/도메인.js';import {AppErrorSchema}from'../../src/shared/포트.js';
+test.each([['RUN_ACTIVE','cancel'],['FINAL_NOT_APPROVED','approve_final'],['QUESTION_STALE','answer'],['IMAGE_GENERATION_FAILED','retry'],['EXTERNAL_OUTCOME_UNKNOWN','retry']]as const)('%s 오류는 실행 가능한 다음 동작을 제공한다',(code,action)=>{const e=new DomainError(code);expect(e.error.nextActions).toContain(action);expect(e.error.message).not.toBe(code);expect(AppErrorSchema.safeParse(e.error).success).toBe(true);});

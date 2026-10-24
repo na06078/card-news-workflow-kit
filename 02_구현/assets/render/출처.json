@@ -1,0 +1,12 @@
+{
+  "NotoSansKR.woff2": {
+    "url": "https://fonts.gstatic.com/s/notosanskr/v40/PbyxFmXiEBPT4ITbgNA5Cgms3VYcOA-vvnIzzuoyeLE.woff2",
+    "bytes": 2054156,
+    "sha256": "8de76e6fd485a7b9020bf8cfd39146fd859df851b0d36ceb0eaa58cd311d358e"
+  },
+  "OFL.txt": {
+    "url": "https://raw.githubusercontent.com/google/fonts/main/ofl/notosanskr/OFL.txt",
+    "bytes": 4388,
+    "sha256": "1c05c68c34f9708415aada51f17e1b0092d2cea709bf4a94cd38114f9e73d7d9"
+  }
+}

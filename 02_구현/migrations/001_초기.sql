@@ -1,0 +1,15 @@
+CREATE TABLE IF NOT EXISTS store_settings(id INTEGER PRIMARY KEY CHECK(id=1), data_mode TEXT NOT NULL CHECK(data_mode IN ('real','mock')));
+CREATE TABLE IF NOT EXISTS schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS projects(id TEXT PRIMARY KEY, payload TEXT NOT NULL CHECK(json_valid(payload)));
+CREATE TABLE IF NOT EXISTS requests(scope TEXT NOT NULL, request_id TEXT NOT NULL, method TEXT NOT NULL, route TEXT NOT NULL, canonical TEXT NOT NULL, sha256 TEXT NOT NULL, status INTEGER NOT NULL, body TEXT NOT NULL CHECK(json_valid(body)), PRIMARY KEY(scope,request_id));
+CREATE TABLE IF NOT EXISTS runs(id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), status TEXT NOT NULL, payload TEXT NOT NULL, base_version INTEGER NOT NULL, owner TEXT, lease_until TEXT, fence INTEGER NOT NULL DEFAULT 0, revision TEXT, parent_id TEXT REFERENCES runs(id));
+CREATE UNIQUE INDEX IF NOT EXISTS one_active_run ON runs(project_id) WHERE status IN ('queued','running','waiting_for_user','cancel_requested');
+CREATE TABLE IF NOT EXISTS events(project_id TEXT NOT NULL REFERENCES projects(id), seq INTEGER NOT NULL, run_id TEXT NOT NULL REFERENCES runs(id), payload TEXT NOT NULL, PRIMARY KEY(project_id,seq));
+CREATE TABLE IF NOT EXISTS questions(project_id TEXT NOT NULL REFERENCES projects(id), id TEXT NOT NULL, version INTEGER NOT NULL, status TEXT NOT NULL, payload TEXT NOT NULL, mapping TEXT, PRIMARY KEY(project_id,id,version));
+CREATE UNIQUE INDEX IF NOT EXISTS one_open_question ON questions(project_id) WHERE status='open';
+CREATE TABLE IF NOT EXISTS answers(project_id TEXT NOT NULL, question_id TEXT NOT NULL, version INTEGER NOT NULL, payload TEXT NOT NULL, base_before INTEGER NOT NULL, base_after INTEGER NOT NULL, delivered_attempt INTEGER, PRIMARY KEY(project_id,question_id,version), FOREIGN KEY(project_id,question_id,version) REFERENCES questions(project_id,id,version));
+CREATE TABLE IF NOT EXISTS sessions(session_id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),run_id TEXT NOT NULL REFERENCES runs(id),cwd TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS invocations(run_id TEXT NOT NULL REFERENCES runs(id),attempt INTEGER NOT NULL,payload TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS assets(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),path TEXT NOT NULL UNIQUE,payload TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS exports(id TEXT PRIMARY KEY,project_id TEXT NOT NULL REFERENCES projects(id),result_version INTEGER NOT NULL,asset_id TEXT NOT NULL REFERENCES assets(id),payload TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS history(project_id TEXT NOT NULL REFERENCES projects(id),version INTEGER NOT NULL,payload TEXT NOT NULL,PRIMARY KEY(project_id,version));

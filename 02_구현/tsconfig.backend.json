@@ -1,0 +1,1 @@
+{"extends":"./tsconfig.json","compilerOptions":{"noEmit":false,"allowImportingTsExtensions":false,"outDir":"dist/server","rootDir":"src","module":"NodeNext","moduleResolution":"NodeNext","jsx":"react-jsx"},"include":["src/shared","src/server-main.ts","src/worker-main.ts","src/backend","src/providers","src/render","src/worker"]}

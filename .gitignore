@@ -1,0 +1,43 @@
+# 비밀 및 로컬 인증 정보
+.env
+.env.*
+!.env.example
+**/.credentials.json
+**/credentials.json
+**/auth.json
+*.pem
+*.key
+*.p12
+*.pfx
+
+# 프로젝트 의존성·캐시·빌드·자동 테스트 산출물
+/02_구현/.도구/
+/02_구현/.브라우저/
+**/node_modules/
+**/.vite/
+**/.cache/
+**/dist/
+**/build/
+**/coverage/
+**/test-results/
+**/playwright-report/
+*.tsbuildinfo
+*.log
+
+# 실제 실행 데이터·DB·생성 이미지·내보내기
+/02_구현/실행데이터/
+/02_구현/검증/통합/중간증거/
+/02_구현/검증/전체흐름/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# OS 임시 파일
+.DS_Store
+Thumbs.db

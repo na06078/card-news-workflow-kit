@@ -1,0 +1,17 @@
+import {listenLocal}from'./HTTP도움.js';
+import {test,expect} from 'vitest';import request from 'supertest';import {randomUUID}from'node:crypto';import {resolve}from'node:path';import {createStore}from'../../src/backend/저장소.js';import {createApp}from'../../src/backend/앱.js';
+test('HTTP bootstrap 세션·정확한 Host/Origin/CSRF·JSON 제한·원장·조회',async()=>{const dataDir=resolve('실행데이터/B1',randomUUID());const s=await createStore({dataDir,dbPath:resolve(dataDir,'검사.sqlite'),dataMode:'mock'});const app=await listenLocal(createApp({store:s,dataDir,allowedHosts:['127.0.0.1:8765'],allowedOrigins:['http://127.0.0.1:5173','http://127.0.0.1:8765']}));
+ expect((await request(app).get('/api/bootstrap').set('Host','evil.example')).status).toBe(403);
+ const boot=await request(app).get('/api/bootstrap').set('Host','127.0.0.1:8765');expect(boot.status).toBe(200);expect(boot.headers['cache-control']).toBe('no-store');const cookie=boot.headers['set-cookie'];const csrf=boot.body.data.csrfToken;
+ const post=(path:string)=>request(app).post(path).set('Host','127.0.0.1:8765').set('Origin','http://127.0.0.1:5173').set('Cookie',cookie).set('X-CSRF-Token',csrf);
+ const input={topic:'HTTP 조사',createRequestId:randomUUID()};expect((await request(app).post('/api/projects').set('Host','127.0.0.1:8765').send(input)).status).toBe(403);
+ expect((await post('/api/projects').set('Origin','https://evil.example').send(input)).status).toBe(403);
+ expect((await post('/api/projects').send({...input,unknown:true})).status).toBe(422);
+ expect((await post('/api/projects').set('Content-Type','application/json').send('{')).status).toBe(400);
+ expect((await post('/api/projects').send({...input,topic:'x'.repeat(270000)})).status).toBe(413);
+ const created=await post('/api/projects').send(input);expect(created.status).toBe(201);const pid=created.body.data.projectId;
+ const repeated=await post('/api/projects').send(input);expect(repeated.status).toBe(201);expect(repeated.headers['idempotency-replayed']).toBe('true');expect(repeated.body).toEqual(created.body);
+ expect((await request(app).get(`/api/projects/${pid}`).set('Host','127.0.0.1:8765').set('Cookie',cookie)).body.data.topic).toBe(input.topic);
+ const v={requestId:randomUUID(),version:1};const jobs=await Promise.all([post(`/api/projects/${pid}/research`).send(v),post(`/api/projects/${pid}/research`).send(v)]);expect(jobs.map(j=>j.status)).toEqual([202,202]);expect(jobs[1]!.body).toEqual(jobs[0]!.body);
+ expect((await request(app).get(`/api/projects/${pid}/events?after=-1`).set('Host','127.0.0.1:8765').set('Cookie',cookie)).status).toBe(422);
+ expect((await request(app).get(`/api/projects/${pid}`).set('Host','127.0.0.1:8765')).status).toBe(403);await s.close();});

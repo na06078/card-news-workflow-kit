@@ -1,0 +1,20 @@
+import {test,expect} from 'vitest';
+import {randomUUID} from 'node:crypto';import {resolve} from 'node:path';
+import {createStore} from '../../src/backend/저장소.js';import {createMockSnapshot} from '../../src/shared/모의자료.js';
+test('후보 commit→선택→질문·답변 영속 전달은 1회이며 오래된 fence를 거절한다',async()=>{
+ const dataDir=resolve('실행데이터/B1',randomUUID());const s=await createStore({dataDir,dbPath:resolve(dataDir,'검사.sqlite'),dataMode:'mock'});
+ const c=await s.createProject({topic:'질문',createRequestId:randomUUID()});if(!('data'in c.body))throw Error();const target={projectId:c.body.data.projectId};
+ await s.mutate('research',target,{requestId:randomUUID(),version:1});const job=await s.claimJob({ownerId:randomUUID(),now:new Date().toISOString(),leaseMs:30000,dataMode:'mock'});if(!job)throw Error('claim');
+ const fixture=createMockSnapshot('selection');const saved=await s.commit(job.fence,{type:'content',content:{kind:'candidates',researchVersion:1,candidates:fixture.candidates,sources:fixture.sources,shortageReason:null}});expect(saved.event?.type).toBe('result');expect((await s.getProject(target.projectId)).stage).toBe('selection');
+ const selected=await s.mutate('selection',target,{requestId:randomUUID(),version:1,candidateIds:fixture.candidates.map(c=>c.candidateId)});expect(selected.status).toBe(202);
+ const editorial=await s.claimJob({ownerId:randomUUID(),now:new Date().toISOString(),leaseMs:30000,dataMode:'mock'});if(!editorial)throw Error('claim editorial');
+ const q={...createMockSnapshot('question').question!,questionId:randomUUID(),runId:editorial.run.runId};const opened=await s.saveQuestion(editorial.fence,q,null);
+ expect(await s.heartbeat(editorial.fence,{now:new Date().toISOString(),leaseMs:30000})).toBe(false);
+ await expect(s.appendEvent(editorial.fence,{type:'progress',phase:'editorial',message:'old',completed:null,total:null})).rejects.toThrow('VERSION_CONFLICT');
+ const answer={requestId:randomUUID(),questionId:q.questionId,version:q.version,answer:[{itemId:'audience',optionIds:['public'],text:null}]};
+ expect((await s.mutate('answers',target,answer)).status).toBe(202);expect((await s.mutate('answers',target,answer)).replayed).toBe(true);
+ const stale=await s.mutate('answers',target,{...answer,requestId:randomUUID()});expect(stale.status).toBe(409);
+ const read=await s.readAnswer(opened.fence,q.questionId,q.version);expect(read?.answer).toEqual(answer.answer);if(!read)throw Error('answer');
+ await s.markAnswerDelivered(read.fence,q.questionId,q.version);expect(await s.readAnswer(read.fence,q.questionId,q.version)).toBe(null);await expect(s.markAnswerDelivered(read.fence,q.questionId,q.version)).rejects.toThrow();
+ const q2={...q,questionId:randomUUID()};const second=await s.saveQuestion(read.fence,q2,null);await s.mutate('answers',target,{...answer,requestId:randomUUID(),questionId:q2.questionId});const pending=await s.readAnswer(second.fence,q2.questionId,q2.version);if(!pending)throw Error();const q3={...q,questionId:randomUUID()};const third=await s.saveQuestion(pending.fence,q3,null);await expect(s.markAnswerDelivered(third.fence,q2.questionId,q2.version)).rejects.toThrow('QUESTION_STALE');await s.close();
+});

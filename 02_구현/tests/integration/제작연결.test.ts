@@ -1,0 +1,44 @@
+import {test,expect} from 'vitest';
+import {chromium} from 'playwright';
+import {resolve} from 'node:path';
+import {randomUUID} from 'node:crypto';
+import {startLocal} from './fixtures/I2/호스트.js';
+
+test('실제 기본 진입점에서 생성·선택·질문·HTTP 재시작·답변 콜백·계획 승인·한국어 PNG 제작',async()=>{
+ const h=await startLocal();const browser=await chromium.launch({executablePath:resolve('.브라우저/chromium-1248/chrome-win64/chrome.exe'),headless:true});
+ const context=await browser.newContext({viewport:{width:1440,height:1100},locale:'ko-KR',timezoneId:'Asia/Seoul',serviceWorkers:'block'});const external:string[]=[],errors:string[]=[];
+ await context.route('**/*',r=>new URL(r.request().url()).origin===h.url?r.continue():(external.push(r.request().url()),r.abort()));const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));
+ try {
+  await page.goto(h.url);await page.getByLabel('조사 주제',{exact:true}).fill('[I2 합성] 전체 로컬 흐름');await page.getByRole('button',{name:'프로젝트 만들기',exact:true}).click();await page.getByRole('button',{name:'자료 조사 시작',exact:true}).waitFor();
+  const id=new URL(page.url()).searchParams.get('project')!;expect(id).toBeTruthy();const a=await h.api();expect((await a.client.getProject(id)).activeRun).toBeNull();
+  await page.getByRole('button',{name:'자료 조사 시작',exact:true}).click();await h.waitFor(id,p=>!!p.activeRun);await h.worker.tick();await page.reload();await page.getByRole('heading',{name:'후보 선택',exact:true}).waitFor();
+  expect(await page.getByRole('checkbox').count()).toBe(7);await page.getByRole('checkbox').nth(0).check();await page.getByRole('button',{name:'선택한 후보로 진행',exact:true}).click();await h.waitFor(id,p=>p.activeRun?.kind==='editorial');
+  const active=h.worker.tick();let waiting=await h.waitFor(id,p=>p.question?.status==='open');
+  await page.reload();await page.getByRole('heading',{name:'편집 방향 확인',exact:true}).waitFor();expect(await page.getByRole('radio').nth(0).isChecked()).toBe(false);expect(h.calls.answers).toEqual([]);expect(h.calls.syntheticImage).toBe(0);
+  await page.screenshot({path:resolve(h.data,'01-질문대기.png'),fullPage:true});h.restartHttp();await page.reload();await page.getByRole('heading',{name:'편집 방향 확인',exact:true}).waitFor();
+  await page.getByRole('radio').nth(1).check();const pending=page.waitForResponse(r=>r.url().endsWith('/answers')&&r.request().method()==='POST');await page.getByRole('button',{name:'답변 저장',exact:true}).click();const response=await pending;expect(response.status()).toBe(202);const payload=response.request().postDataJSON();const receipt=await response.json();await active;await a.client.bootstrap();
+  let p=await a.client.getProject(id);await h.save('편집진단.json',p);expect(p.storyboard?.audience,JSON.stringify(p.lastRun)).toBe('개발자');expect(h.calls.answers).toHaveLength(1);expect(h.calls.answers[0].projectId).toBe(id);expect(p.selectedCandidateIds).toEqual([p.candidates[0].candidateId]);expect(h.calls.syntheticImage).toBe(0);
+  const afterRestart=await h.api();const replay=await afterRestart.post(`/api/projects/${id}/answers`,payload);expect(replay.status).toBe(202);expect(replay.replayed).toBe(true);expect(replay.body).toEqual(receipt);
+  const stale=await afterRestart.post(`/api/projects/${id}/answers`,{...payload,requestId:randomUUID()});expect(stale.status).toBe(409);expect(stale.body.error.code).toBe('QUESTION_STALE');expect(h.calls.answers).toHaveLength(1);
+  await page.reload();await page.getByRole('heading',{name:'스토리보드',exact:true}).waitFor();await page.screenshot({path:resolve(h.data,'02-승인대기.png'),fullPage:true});expect(await h.worker.tick()).toBe(false);expect(h.calls.syntheticImage).toBe(0);
+  await page.getByLabel('계획과 크기를 확인했습니다',{exact:true}).check();await page.getByRole('button',{name:'스토리보드 승인 · 제작 시작',exact:true}).click();await h.waitFor(id,p=>p.activeRun?.kind==='production');await h.worker.tick();p=await a.client.getProject(id);expect(p.lastRun?.status,JSON.stringify(p.lastRun)).toBe('succeeded');expect(p.result?.cards.every(c=>c.state==='ready')).toBe(true);expect(h.calls.syntheticImage).toBe(2);
+  await page.reload();await page.getByRole('heading',{name:'카드 검수',exact:true}).waitFor();expect(await page.locator('.preview img').count()).toBe(2);await page.screenshot({path:resolve(h.data,'03-실제한글PNG.png'),fullPage:true});await page.setViewportSize({width:375,height:812});expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);await page.screenshot({path:resolve(h.data,'04-375px.png'),fullPage:true});
+  // 실제 F1 텍스트 폼 → HTTP revision → W1 → 동일 그림 재사용 → R1 재렌더.
+  await page.setViewportSize({width:1440,height:1100});
+  await page.getByRole('button',{name:'카드 2 개별 승인',exact:true}).click();await h.waitFor(id,p=>p.result?.cards[1].approvedRevision===1);p=await a.client.getProject(id);
+  const before=structuredClone(p.result!),other=before.cards[1],image=await h.store.getAsset(id,before.cards[0].imageAssetId!),oldHash=await h.hash(image.absolutePath),imageCalls=h.calls.syntheticImage;
+  await page.getByLabel('카드 1 제목',{exact:true}).fill('합성 제목 수정');await page.getByRole('button',{name:'카드 1 텍스트 수정 요청',exact:true}).click();await h.waitFor(id,p=>p.activeRun?.kind==='revision');await h.worker.tick();p=await a.client.getProject(id);
+  expect(p.lastRun?.status,JSON.stringify(p.lastRun)).toBe('succeeded');expect(p.result!.cards[1]).toEqual(other);expect(p.result!.cards[0].imageAssetId).toBe(before.cards[0].imageAssetId);expect(await h.hash(image.absolutePath)).toBe(oldHash);expect(h.calls.syntheticImage).toBe(imageCalls);expect(p.result!.cards[0].revision).toBe(2);expect(p.result!.cards[0].previewAssetId).not.toBe(before.cards[0].previewAssetId);
+  await page.reload();await page.getByLabel('사실·출처와 시각적 가독성을 직접 확인했습니다',{exact:true}).check();await page.getByRole('button',{name:'현재 결과 최종 승인',exact:true}).click();await h.waitFor(id,p=>p.activeRun?.kind==='export');await h.worker.tick();p=await a.client.getProject(id);expect(p.lastRun?.status,JSON.stringify(p.lastRun)).toBe('succeeded');expect(p.result!.finalApprovedVersion).toBe(p.result!.version);expect(p.exports.length).toBe(p.result!.cards.length+4);
+  const {unzipSync}=await import('fflate');const {PNG}=await import('pngjs');const {verifyZip}=await import('../../src/render/압축검사.js');
+  const entries=p.exports,zip=entries.find(e=>e.kind==='zip')!;const zipResponse=await a.get(zip.downloadUrl);expect(zipResponse.status).toBe(200);const zipBytes=Buffer.from(await zipResponse.arrayBuffer());const unpacked=unzipSync(zipBytes);expect(Object.keys(unpacked)).toEqual(['01.png','02.png','출처기록.json','이미지기록.json','글꼴라이선스.txt']);
+  verifyZip(zipBytes,['01.png','02.png','출처기록.json','이미지기록.json','글꼴라이선스.txt']);
+  for(const entry of entries){const r=await a.get(entry.downloadUrl);expect(r.status).toBe(200);const bytes=Buffer.from(await r.arrayBuffer());const {createHash}=await import('node:crypto');expect(createHash('sha256').update(bytes).digest('hex')).toBe(entry.sha256);if(entry.kind==='png'){const png=PNG.sync.read(bytes,{checkCRC:true});expect([png.width,png.height]).toEqual([1080,1080]);}const {writeFile}=await import('node:fs/promises');await writeFile(resolve(h.data,'다운로드-'+entry.filename),bytes);}
+  expect(Buffer.from(unpacked['출처기록.json']).toString()).toContain('SYNTHETIC');expect(Buffer.from(unpacked['이미지기록.json']).toString()).toContain('OFFLINE_TEST_FAKE');await page.reload();const downloadEvent=page.waitForEvent('download');await page.locator(`a[href="${zip.downloadUrl}"]`).click();const browserZip=await downloadEvent;await browserZip.saveAs(resolve(h.data,'브라우저-전체.zip'));expect(await h.hash(resolve(h.data,'브라우저-전체.zip'))).toBe(zip.sha256);await page.screenshot({path:resolve(h.data,'05-최종다운로드.png'),fullPage:true});
+  // 최종 승인 이후 변경 접수 즉시 과거 다운로드/승인 version을 실제 HTTP로 거절.
+  const version=p.result!.version;await a.client.mutate('revisions',{projectId:id},{scope:'text',cardIds:[p.result!.cards[0].cardId],instruction:JSON.stringify({title:'합성 후속 수정',body:p.result!.cards[0].body}),version,requestId:randomUUID()});
+  expect((await a.get(zip.downloadUrl)).status).toBe(409);const staleApproval=await afterRestart.post(`/api/projects/${id}/approve`,{stage:'final',version,requestId:randomUUID()});expect(staleApproval.status).toBe(409);expect((await a.client.getProject(id)).exports).toEqual([]);await h.worker.tick();
+  h.record('revision-export',{projectId:id,imageHashPreserved:oldHash,nonTargetPreserved:true,resultVersion:version,entries,zipNames:Object.keys(unpacked),crc:'verifyZip real headers/CRC',staleDownload:409,staleApproval:409});
+  expect(external).toEqual([]);expect(errors).toEqual([]);await h.save('제작스냅샷.json',p);h.record('browser-production',{projectId:id,questionId:waiting.question!.questionId,callbackCount:h.calls.answers.length,realHttp:true,syntheticExternal:true,external,errors});
+ } finally {await browser.close();await h.close();}
+},60000);

@@ -1,0 +1,5 @@
+{
+  "extends": "../../tsconfig.json",
+  "include": ["../../src/worker/**/*.ts", "../../src/providers/**/*.ts", "./**/*.ts", "../providers/**/*.ts", "../shared/**/*.ts", "../render/배치.test.ts"],
+  "exclude": []
+}

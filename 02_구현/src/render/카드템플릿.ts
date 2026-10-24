@@ -1,0 +1,10 @@
+import type {RenderInput,DeepReadonly} from '../shared/포트.js';
+export const escapeText=(text:string)=>text.replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]!));
+export function cardHtml(input:DeepReadonly<RenderInput>,css:string,image:Buffer,font:Buffer):string{
+ const height=input.size==='1080x1350'?1350:1080;
+ const layout=input.card.layout??{fontScale:'normal',textAlign:'left',placement:'bottom'};
+ const classes=[input.card.role,{small:'font-small',normal:'font-normal',large:'font-large'}[layout.fontScale],{left:'align-left',center:'align-center'}[layout.textAlign],{top:'place-top',bottom:'place-bottom'}[layout.placement]].join(' ');
+ const sources=input.sourceLabels.map(s=>`<div class="source">${escapeText(s.label)} · ${escapeText(s.url)}</div>`).join('');
+ const role={cover:'핵심을 읽다',body:'변화를 살피다',closing:'다음으로 이어가다'}[input.card.role];
+ return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline'; connect-src 'none'; base-uri 'none'; form-action 'none'"><style>@font-face{font-family:'Noto Sans KR';src:url(data:font/woff2;base64,${font.toString('base64')}) format('woff2');font-weight:400;font-style:normal;font-display:block}${css}</style></head><body><article id="card" class="${classes}" style="height:${height}px"><img id="background" alt="설명용 이미지" src="data:image/png;base64,${image.toString('base64')}"><div class="veil"></div><div class="content"><div class="eyebrow" data-check>${role}<span>${String(input.card.order).padStart(2,'0')}</span></div><section class="main"><h1 data-check>${escapeText(input.card.title)}</h1><p data-check>${escapeText(input.card.body)}</p></section><footer><div class="sources" data-check>${sources||'연결된 원문 없음 · 출처기록을 확인하세요'}</div><div class="meta" data-check><span>조사 기준 ${escapeText(input.researchAt)}</span><span>설명용 이미지</span></div></footer></div></article></body></html>`;
+}

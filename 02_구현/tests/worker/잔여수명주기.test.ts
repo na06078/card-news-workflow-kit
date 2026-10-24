@@ -1,0 +1,23 @@
+import {test,expect,vi} from 'vitest';
+import {randomUUID} from 'node:crypto';
+import {createWorker} from '../../src/worker/작업자.js';
+import {setup,options,enqueueProduction,confirmed,fixture} from './도움.js';
+import {fakeImage,fakeRender} from './합성자산.js';
+import type {ProjectSnapshot,RevisionRequest} from '../../src/shared/포트.js';
+for(const scope of ['layout','text'] as const)test(`${scope} 내용 저장 후 render 재시도는 공급자 재호출/재과금 없이 실패 단계만 재개한다`,async()=>{
+ const s=await setup(),o=options(s);let fail=false;const provider=vi.fn(o.createClaudeAdapter);o.agy.generate=vi.fn(fakeImage);o.renderCard=async i=>{if(fail)throw Error('W1 render failure');return fakeRender(i);};const calls:string[]=[];
+ o.createClaudeAdapter=({bridge})=>({async *start(c,raw){const {snapshot,request}=raw as {snapshot:ProjectSnapshot;request:RevisionRequest};calls.push(request.scope);yield await bridge.publishResult(c,{kind:'cards',cards:snapshot.result!.cards.filter(x=>request.cardIds.includes(x.cardId)).map(x=>({...x,...(scope==='layout'?{layout:{fontScale:'small' as const,textAlign:'center' as const,placement:'top' as const}}:{title:x.title+' 수정'})})),factsCheck:'pending',visualCheck:'pending'});},answer:async()=>{},status:id=>s.store.getRun(id),cancel:async id=>confirmed(id),dispose:async()=>[]});
+ const w=createWorker(o);try{await enqueueProduction(s);await w.tick();let p=await s.store.getProject(s.pid);fail=true;await s.store.mutate('revisions',{projectId:s.pid},{requestId:randomUUID(),version:1,scope,cardIds:[p.result!.cards[0].cardId],instruction:'대상 수정'});await w.tick();p=await s.store.getProject(s.pid);expect(p.lastRun?.status).toBe('failed');expect(p.result!.cards[0].state).toBe('failed');const saved=p.result!.cards[0];fail=false;await s.store.mutate('retry',{projectId:s.pid,runId:p.lastRun!.runId},{requestId:randomUUID(),version:p.projectVersion,confirmUnknownOutcome:true});await w.tick();p=await s.store.getProject(s.pid);expect(p.lastRun?.status).toBe('succeeded');expect(calls).toEqual([scope]);expect(p.result!.cards[0].title).toBe(saved.title);expect(p.result!.cards[0].layout).toEqual(saved.layout);expect(vi.mocked(o.agy.generate)).toHaveBeenCalledTimes(2);
+ }finally{await w.dispose();await s.store.close();}
+});
+test('cancel이 real commit 직전에 이기면 늦은 result/history가 commit되지 않는다',async()=>{
+ const s=await setup(),o=options(s),real=s.store.commit.bind(s.store);let raced=false;
+ o.store={...s.store,async commit(f,value){if(value.type==='content'&&!raced){raced=true;await s.store.mutate('cancel',{projectId:s.pid,runId:f.runId},{requestId:randomUUID()});}return real(f,value);}};const w=createWorker(o);try{await s.store.mutate('research',{projectId:s.pid},{requestId:randomUUID(),version:1});await w.tick();const p=await s.store.getProject(s.pid);expect(p.lastRun?.status).toBe('canceled');expect(p.candidates).toEqual([]);expect((await s.store.getEvents(s.pid,0)).events.some(e=>e.type==='result')).toBe(false);}finally{await w.dispose();await s.store.close();}
+});
+test('렌더 도중 취소는 settlement를 기다리고 tree 증거가 없으면 cancel_requested/cleanup failed를 유지한다',async()=>{
+ const s=await setup(),o=options(s);let entered!:()=>void,release!:()=>void;const ready=new Promise<void>(r=>{entered=r;}),done=new Promise<void>(r=>{release=r;});o.agy.generate=fakeImage;o.renderCard=async i=>{entered();await done;return fakeRender(i);};const w=createWorker(o);
+ try{await enqueueProduction(s);const task=w.tick();await ready;const run=(await s.store.getProject(s.pid)).activeRun!;await s.store.mutate('cancel',{projectId:s.pid,runId:run.runId},{requestId:randomUUID()});release();await task;const p=await s.store.getProject(s.pid);expect(p.lastRun).toMatchObject({status:'cancel_requested',error:{code:'CANCEL_CLEANUP_FAILED'}});expect(p.result).toBeNull();}finally{release();await w.dispose();await s.store.close();}
+});
+test('adapter dispose 예외는 tick/stop에서 숨기지 않고 공유 store는 계속 사용 가능하다',async()=>{
+ const s=await setup(),o=options(s);o.createClaudeAdapter=({bridge})=>({async *start(c){yield await bridge.publishResult(c,{kind:'candidates',researchVersion:1,candidates:fixture.candidates,sources:fixture.sources,shortageReason:null});},answer:async()=>{},status:id=>s.store.getRun(id),cancel:async id=>confirmed(id),dispose:async()=>{throw Error('W1_DISPOSE_FAILURE');}});const w=createWorker(o);try{await s.store.mutate('research',{projectId:s.pid},{requestId:randomUUID(),version:1});await expect(w.tick()).rejects.toThrow('W1_DISPOSE_FAILURE');expect((await s.store.getProject(s.pid)).lastRun?.status).toBe('succeeded');await w.dispose();await w.dispose();expect(await w.tick()).toBe(false);await expect(w.start()).rejects.toThrow('WORKER_DISPOSED');}finally{await s.store.close();}
+});
