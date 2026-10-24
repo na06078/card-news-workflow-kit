@@ -31,5 +31,5 @@ it('컴파일된 실제 worker/Windows Job 기동: 기존 queued를 실호출 �
   const ready=await new Promise<any>((r,j)=>{const timer=setTimeout(()=>j(Error('WORKER_READY_TIMEOUT')),15000);child.once('error',j);child.once('message',m=>{clearTimeout(timer);r(m);});});
   expect(ready.gate).toContain('FRESH_USER_ACTION_ONLY');
   await vi.waitFor(async()=>expect(await store.getRun(old.runId)).toMatchObject({status:'failed',externalOutcome:'not_started',error:{details:{reason:'FRESH_USER_ACTION_REQUIRED'}}}));
- }finally{if(child.connected)child.send({type:'shutdown'});expect(await exit).toBe(0);await writeFile(resolve(dir,'native-worker.log'),log);await store.close();}
+ }finally{if(child.connected)child.send({type:'shutdown'});const code=await exit;await writeFile(resolve(dir,'native-worker.log'),log);await store.close();expect(code,log).toBe(0);}
 },25000);

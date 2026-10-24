@@ -13,6 +13,7 @@ import type {CleanupReport} from '../shared/포트.js';
 import {ownedDescendantsExited} from './프로세스격리.js';
 export type QueryFactory=(params:Parameters<typeof query>[0])=>AsyncIterable<SDKMessage>&{close():void}&Partial<Pick<Query,'initializationResult'|'accountInfo'>>;
 type Runtime={offline:boolean;open:(params:Parameters<typeof query>[0])=>Promise<ReturnType<QueryFactory>>};
+const unavailableModel=/selected model[\s\S]*may not exist[\s\S]*access|model[^\n]*(?:not found|does not exist|do not have access)/i;
 function aborted(signal:AbortSignal){if(signal.aborted)fail('EXTERNAL_OUTCOME_UNKNOWN');}
 async function waitAbortable<T>(promise:Promise<T>,signal:AbortSignal):Promise<T>{
  aborted(signal);let onAbort:()=>void=()=>{};
@@ -74,7 +75,7 @@ function buildAdapter(options:ClaudeOptions,runtime:Runtime):ClaudeAdapter {
       if(name==='WebSearch')return typeof data.query==='string'&&data.query.length>0&&data.query.length<=2000;
       return name==='AskUserQuestion';
      };
-     const sdkOptions:Options={cwd:context.cwd,resume:context.engineSessionId??undefined,abortController:controller,env:childEnvironment(),settingSources:[],strictMcpConfig:true,mcpServers:{},plugins:[],tools:allowed,permissionMode:'default',persistSession:true,
+     const sdkOptions:Options={...(context.requestedModel?{model:context.requestedModel}:{}),cwd:context.cwd,resume:context.engineSessionId??undefined,abortController:controller,env:childEnvironment(),settingSources:[],strictMcpConfig:true,mcpServers:{},plugins:[],tools:allowed,permissionMode:'default',persistSession:true,
       settings:{autoMemoryEnabled:false,disableAllHooks:true,forceLoginMethod:'claudeai',apiKeyHelper:''},
       outputFormat:{type:'json_schema',schema:z.toJSONSchema(outputSchema,{target:'draft-7'})},
       hooks:{PreModelSwitch:[{hooks:[async()=>({hookSpecificOutput:{hookEventName:'PreModelSwitch' as const,permissionDecision:'deny' as const,permissionDecisionReason:'승인 없는 모델 전환 금지'}})]}],PreToolUse:[{hooks:[async hook=>{
@@ -136,6 +137,7 @@ function buildAdapter(options:ClaudeOptions,runtime:Runtime):ClaudeAdapter {
      for await(const message of queryHandle){
       aborted(controller.signal);
       if(['result','assistant','auth_status','rate_limit_event'].includes(message.type)&&(!('session_id'in message)||typeof message.session_id!=='string'||!message.session_id))fail('PROVIDER_PROTOCOL_ERROR');
+      if(context.requestedModel&&message.type==='result'&&message.subtype!=='success'&&(!sessionId||sessionId===message.session_id)&&message.errors?.some(text=>unavailableModel.test(text)))throw new Error('model not found');
       if('session_id'in message && typeof message.session_id==='string'){
        if(!message.session_id)fail('PROVIDER_PROTOCOL_ERROR');
        if(sessionId&&message.session_id!==sessionId)fail('PROVIDER_PROTOCOL_ERROR');
@@ -150,7 +152,7 @@ function buildAdapter(options:ClaudeOptions,runtime:Runtime):ClaudeAdapter {
        if(message.apiKeySource!=='none')fail('AUTH_PATH_FORBIDDEN');
        const owner=sessions.get(message.session_id);if(owner&&(owner.projectId!==context.projectId||owner.cwd!==resolve(context.cwd)))fail('PROVIDER_PROTOCOL_ERROR');
        sessions.set(message.session_id,{projectId:context.projectId,cwd:resolve(context.cwd)});await bridge.saveSession(context,message.session_id);initialized=true;
-       emit(await bridge.progress(context,{type:'progress',phase:context.phase,message:'엔진 세션 연결됨',completed:null,total:null}));
+       emit(await bridge.progress(context,{type:'progress',phase:context.phase,message:'엔진 세션 연결됨',completed:null,total:null,...(message.model?{actualModel:message.model}:{})}));
       }else if(message.type==='assistant'&&message.error){
        if(message.error==='authentication_failed')fail('LOGIN_REQUIRED');
        if(message.error==='rate_limit')fail('SUBSCRIPTION_QUOTA');
@@ -192,7 +194,14 @@ function buildAdapter(options:ClaudeOptions,runtime:Runtime):ClaudeAdapter {
       }
      }
      if(!resultSeen)fail('PROVIDER_PROTOCOL_ERROR');
-    }catch(error){emit(await bridge.publishError(context,appError(error,context)));}
+    }catch(error){
+     const safe=appError(error,context);
+     // Recognize only an observed model-access failure; never expose SDK text.
+     if(context.requestedModel&&error instanceof Error&&unavailableModel.test(error.message)){
+      safe.code='MODEL_UNAVAILABLE';safe.message='선택한 모델을 사용할 수 없어 실행을 중단했습니다. 모델 목록과 계정 접근 권한을 확인해 주세요. 기본 모델로 전환하지 않았습니다.';safe.details={reason:'MODEL_UNAVAILABLE'};
+     }
+     emit(await bridge.publishError(context,safe));
+    }
     finally{
      releasePrompt(false);
      try{queryHandleClose(run);}catch{cleanupFailed=true;}

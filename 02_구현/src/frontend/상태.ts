@@ -43,7 +43,7 @@ export function createController(client:FrontendClient,onProject?:(id:string)=>v
    if(failure.status===409){try{await refresh();}catch{/* 원래 충돌 안내 유지 */}}
   }finally{if(g===generation)update({busy:false});}
  }
- async function open(id:string){const g=++generation;projectId=id;seq=0;minVersion=0;pending=null;update({snapshot:null,busy:false,error:null,notice:'',events:[],pendingRetry:false,lastSyncedAt:null,historyMore:false});try{await client.bootstrap();if(g===generation)await refresh();}catch(e){if(g===generation)update({error:asFailure(e),loading:false});}}
+ async function open(id:string){if(state.busy||state.pendingRetry)return;const g=++generation;projectId=id;seq=0;minVersion=0;pending=null;update({snapshot:null,busy:false,error:null,notice:'',events:[],pendingRetry:false,lastSyncedAt:null,historyMore:false});try{await client.bootstrap();if(g===generation)await refresh();}catch(e){if(g===generation)update({error:asFailure(e),loading:false});}}
  const send:Send=async(name,fields={},cardId)=>{
   if(state.busy||state.pendingRetry||!state.snapshot)return;
   const p=state.snapshot;const target:MutationTarget={projectId:p.projectId,...(cardId?{cardId}:{}),...((p.activeRun??p.lastRun)?{runId:(p.activeRun??p.lastRun)!.runId}:{})};
@@ -54,17 +54,17 @@ export function createController(client:FrontendClient,onProject?:(id:string)=>v
   await execute(async()=>{const receipt=await client.mutate(name,target,input.data as RequestByMutation[typeof name]);if(g!==generation)return;minVersion=Math.max(minVersion,receipt.projectVersion);await refresh();});
  };
  return {getState:()=>state,subscribe:(fn:()=>void)=>{listeners.add(fn);return ()=>{listeners.delete(fn);};},open,refresh,
-  async create(topic:string,period:7|30){if(state.busy||state.pendingRetry)return;
-   const input=CreateProjectRequestSchema.safeParse({topic,period,createRequestId:crypto.randomUUID()});if(!input.success){update({error:clientError('CLIENT_INPUT_ERROR','주제를 1~500자로 입력해 주세요.')});return;}
+  async create(topic:string,period:7|30,claudeModel:string|null=null){if(state.busy||state.pendingRetry)return;
+   const input=CreateProjectRequestSchema.safeParse({topic,period,claudeModel,createRequestId:crypto.randomUUID()});if(!input.success){update({error:clientError('CLIENT_INPUT_ERROR','주제를 1~500자로 입력해 주세요.')});return;}
    await execute(async()=>{const receipt=await client.createProject(input.data);projectId=receipt.projectId;minVersion=receipt.projectVersion;onProject?.(projectId);await refresh();});
   },send,
   async retryPending(){if(pending)await execute(pending);},
-  async refreshSafely(){try{await refresh();update({notice:'현재 서버 상태를 다시 확인했습니다.'});}catch(e){update({error:asFailure(e)});}},
+  async refreshSafely(){const g=generation;try{await refresh();if(g===generation)update({notice:'현재 서버 상태를 다시 확인했습니다.'});}catch(e){if(g===generation)update({error:asFailure(e)});}},
   async poll(){if(refreshing||state.busy||!projectId)return;refreshing=true;const g=generation,id=projectId;
    try {await refresh();if(g===generation)return state.historyMore;}
    finally{refreshing=false;}return false;
   },
-  reset(){generation++;projectId=null;pending=null;minVersion=0;seq=0;update({snapshot:null,busy:false,loading:false,error:null,pendingRetry:false,events:[],notice:'',historyMore:false,lastSyncedAt:null});},
+  reset(){if(state.busy||state.pendingRetry)return;generation++;projectId=null;pending=null;minVersion=0;seq=0;update({snapshot:null,busy:false,loading:false,error:null,pendingRetry:false,events:[],notice:'',historyMore:false,lastSyncedAt:null});},
  };
 }
 export type Controller=ReturnType<typeof createController>;

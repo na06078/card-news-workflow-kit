@@ -17,10 +17,10 @@ describe('복원·충돌·오류 화면',()=>{
   await screen.findByText('QUESTION_STALE');expect(get).toHaveBeenCalledTimes(2);expect(mutate).toHaveBeenCalledTimes(1);expect(screen.getByText(/이전 입력을 자동으로 덮어쓰지/)).toBeVisible();
  });
  it('waiting은 오류가 아니며 취소 접수와 정리 완료를 구분한다',async()=>{
-  const client=createMockClient('question');render(<App client={client} initialProjectId={MOCK_IDS.project}/>);
+  const client=createMockClient('question');const workspaceClient={deleteProject:vi.fn(),listProjects:vi.fn(async()=>({projects:[]})),providerStatus:vi.fn(),refreshProviders:vi.fn(async()=>({refreshing:false,models:{status:'unknown' as const,checkedAt:null,models:[],error:null},providers:[]})),setProjectModel:vi.fn()};render(<App client={client} workspaceClient={workspaceClient} initialProjectId={MOCK_IDS.project}/>);
   await screen.findByRole('heading',{name:'사용자 답변 대기'});expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   cleanup();const p=createMockSnapshot('question');p.activeRun!.status='cancel_requested';p.question=null;p.allowedActions=['cancel'];
-  render(<App client={createMockClient(p)} initialProjectId={MOCK_IDS.project}/>);
+  render(<App client={createMockClient(p)} workspaceClient={workspaceClient} initialProjectId={MOCK_IDS.project}/>);
   await screen.findByRole('heading',{name:'취소 요청됨 · 정리 확인 중'});expect(screen.getByRole('button',{name:'작업 취소 요청'})).toBeDisabled();
  });
  it('외부 결과 불명의 중단은 중복 위험 확인 전 재시도를 막는다',async()=>{

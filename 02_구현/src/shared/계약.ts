@@ -28,15 +28,15 @@ export type Storyboard = {version:number;audience:string;rationale:string;format
 export type CardLayout = {fontScale:'small'|'normal'|'large';textAlign:'left'|'center';placement:'top'|'bottom'};
 export type CardRevision = CardPlan & {layout?:CardLayout;revision:number;imageAssetId:string|null;previewAssetId:string|null;state:'pending'|'generating'|'rendering'|'ready'|'failed';approvedRevision:number|null;error:AppError|null};
 export type ResultVersion = {version:number;storyboardVersion:number;size:Size;cards:CardRevision[];factsCheck:'pending'|'passed'|'failed';visualCheck:'pending'|'passed'|'failed';finalApprovedVersion:number|null};
-export type Run = {runId:string;projectId:string;kind:'research'|'editorial'|'production'|'revision'|'export';status:RunStatus;attempt:number;phase:string;createdAt:string;updatedAt:string;lastEventSeq:number;questionId:string|null;error:AppError|null;externalOutcome:'not_started'|'known'|'unknown';retryAllowed:boolean};
+export type Run = {runId:string;projectId:string;kind:'research'|'editorial'|'production'|'revision'|'export';status:RunStatus;attempt:number;phase:string;createdAt:string;updatedAt:string;lastEventSeq:number;questionId:string|null;error:AppError|null;externalOutcome:'not_started'|'known'|'unknown';retryAllowed:boolean;requestedModel?:string|null;actualModel?:string};
 export type ExportEntry = {exportId:string;projectId:string;resultVersion:number;kind:'png'|'zip'|'records';cardId:string|null;cardRevision:number|null;filename:string;mimeType:string;bytes:number;sha256:string;downloadUrl:string};
-export type ProjectSnapshot = {projectId:string;topic:string;projectVersion:number;stage:Stage;status:ProjectStatus;
+export type ProjectSnapshot = {projectId:string;topic:string;projectVersion:number;stage:Stage;status:ProjectStatus;claudeModel?:string|null;modelSettingsVersion?:number;
   period:{days:7|30;anchorAt:string;from:string;to:string};researchVersion:number;candidates:Candidate[];sources:Source[];claims:Claim[];
   selectedCandidateIds:string[];question:Question|null;storyboard:Storyboard|null;result:ResultVersion|null;activeRun:Run|null;lastRun:Run|null;allowedActions:NextAction[];exports:ExportEntry[];dataMode:'real'|'mock'};
-export type EngineContext = {projectId:string;runId:string;attempt:number;engine:'claude-agent-sdk';engineSessionId:string|null;cwd:string;phase:'research'|'editorial'|'revision';baseProjectVersion:number};
+export type EngineContext = {projectId:string;runId:string;attempt:number;engine:'claude-agent-sdk';engineSessionId:string|null;cwd:string;phase:'research'|'editorial'|'revision';baseProjectVersion:number;requestedModel?:string|null};
 export type ProgressActivity = {provider:'claude'|'agy'|'app';operation:'authentication'|'search'|'fetch'|'planning'|'image'|'conversion'|'render'|'export';status:'started'|'completed'|'failed'|'waiting';cardId?:string;tool?:string};
 export type EngineEvent = {seq:number;projectId:string;runId:string;attempt:number;at:string} & (
-  {type:'progress';phase:string;message:string;completed:number|null;total:number|null;activity?:ProgressActivity} |
+  {type:'progress';phase:string;message:string;completed:number|null;total:number|null;activity?:ProgressActivity;actualModel?:string} |
   {type:'need_input';question:Question} |
   {type:'result';kind:'candidates'|'storyboard'|'cards'|'exports';version:number} |
   {type:'error';error:AppError});
@@ -56,7 +56,7 @@ export type RenderInput = {projectId:string;runId:string;attempt:number;resultVe
   image:{assetId:string;absolutePath:string;sha256:string};researchAt:string;sourceLabels:{sourceId:string;label:string;url:string}[];
   font:{family:'Noto Sans KR';absolutePath:string;licenseAssetId:string};templateVersion:'cn-basic-1';outputPath:string};
 export type RenderOutput = {projectId:string;resultVersion:number;cardId:string;cardRevision:number;path:string;mimeType:'image/png';width:1080;height:1350|1080;sha256:string;bytes:number;checks:{fontLoaded:boolean;imageDecoded:boolean;overflow:boolean};warnings:string[]};
-export type CreateProjectRequest = {topic:string;createRequestId:string;period?:7|30};
+export type CreateProjectRequest = {topic:string;createRequestId:string;period?:7|30;claudeModel?:string|null};
 export type VersionRequest = {requestId:string;version:number};
 export type SelectionRequest = VersionRequest & {candidateIds:string[]};
 export type AnswerRequest = VersionRequest & {questionId:string;answer:AnswerItem[]};
@@ -81,6 +81,7 @@ export type Bootstrap = {csrfToken:string;contractVersion:typeof CONTRACT_VERSIO
 export type EventPage = {events:EngineEvent[];nextSeq:number;hasMore:boolean};
 export type ExportList = {resultVersion:number;entries:ExportEntry[];exportRun:Run|null};
 export const ERROR_HTTP = {
+  PROJECT_DELETING:409,PROJECT_DELETE_FAILED:503,
   VALIDATION_ERROR:422,INVALID_JSON:400,PAYLOAD_TOO_LARGE:413,NOT_FOUND:404,LOCAL_REQUEST_DENIED:403,
   VERSION_CONFLICT:409,QUESTION_STALE:409,REQUEST_ID_CONFLICT:409,STAGE_CONFLICT:409,RUN_ACTIVE:409,FINAL_NOT_APPROVED:409,EXPORT_STALE:409,
   AUTH_PATH_FORBIDDEN:409,AUTH_MODE_UNKNOWN:409,LOGIN_REQUIRED:409,SUBSCRIPTION_EXPIRED:409,SUBSCRIPTION_QUOTA:429,

@@ -1,4 +1,5 @@
 import type * as C from '../shared/포트.js';
+import {AppErrorSchema} from '../shared/포트.js';
 import {workerError,normalizeError,validateEvent} from './실행단계.js';
 import {produce,exportResult} from './제작.js';
 import {bounded,waitForSettlement,cleanupAccepted} from './프로세스관리.js';
@@ -23,6 +24,11 @@ export const createWorker:C.CreateWorker=options=>{
  async function execute(job:C.ClaimedJob,abort:AbortController){
   let fence=job.fence,adapter:C.ClaudeAdapter|undefined,terminal=false,providerResult=false,providerFailure:C.AppError|null=null;
   let providerStarted=false,agyStarted=false,renderStarted=false;
+  const normalizeRunError=(error:unknown):C.AppError=>{
+   const parsed=AppErrorSchema.safeParse(error);
+   if(parsed.success&&parsed.data.code==='MODEL_UNAVAILABLE')return {...workerError('MODEL_UNAVAILABLE',fence),message:'선택한 모델을 사용할 수 없어 실행을 중단했습니다. 모델 목록과 계정 접근 권한을 확인해 주세요. 기본 모델로 전환하지 않았습니다.',retryable:false,nextActions:['contact_user']};
+   return normalizeError(error,fence);
+  };
   let unsettled=false;
   const wait=async<T>(promise:Promise<T>):Promise<T>=>{try{return await waitForSettlement(promise,abort.signal);}catch(error){if(error&&typeof error==='object'&&'code'in error&&error.code==='WORKER_BOUNDARY_UNSETTLED')unsettled=true;throw error;}};
   let cancellation:Promise<C.CleanupReport[]>|null=null;
@@ -41,7 +47,7 @@ export const createWorker:C.CreateWorker=options=>{
    openQuestion:async(c,input)=>locked(async()=>{checkContext(c);await guard();const out=await store.saveQuestion(fence,input.question,input.mapping);fence=out.fence;return out.event;}),
    waitForAnswer:async(c,qid,version,signal)=>{checkContext(c);return waitForStoredAnswer({store,fence:()=>fence,adopt:next=>{fence=next;},guard,locked,pause,signal,workerSignal:abort.signal,questionId:qid,version});},
    publishResult:async(c,content)=>{checkContext(c);await mark(c.phase,'output_observed');await mark(c.phase,'validated');const event=await commit({type:'content',content});if(!event)throw workerError('PROVIDER_PROTOCOL_ERROR',fence);providerResult=true;return event;},
-   publishError:async(c,error)=>{checkContext(c);providerFailure=normalizeError(error,fence);return locked(async()=>{await guard();return store.appendEvent(fence,{type:'error',error:providerFailure!});});},
+   publishError:async(c,error)=>{checkContext(c);providerFailure=normalizeRunError(error);return locked(async()=>{await guard();return store.appendEvent(fence,{type:'error',error:providerFailure!});});},
    saveSession:async(c,id)=>locked(async()=>{checkContext(c);await guard();await store.saveSession(fence,id,c.cwd);}),
    status:id=>store.getRun(id)
   };
@@ -76,7 +82,7 @@ export const createWorker:C.CreateWorker=options=>{
    }else if(!terminal&&!shutdownRequested){try{
     let externalOutcome:C.Run['externalOutcome']=providerStarted||agyStarted?'unknown':'not_started';
     if(externalOutcome==='unknown'&&!unsettled){const reports=await cancelOwned();if(reports.length&&reports.every(r=>r.runId===fence.runId&&r.status==='not_started'&&r.children.length===0))externalOutcome='not_started';}
-    await commit({type:'failure',error:normalizeError(error,fence),externalOutcome,retryAllowed:true});}catch{/* stale owner cannot overwrite */}}
+    await commit({type:'failure',error:normalizeRunError(error),externalOutcome,retryAllowed:true});}catch{/* stale owner cannot overwrite */}}
   }finally{clearInterval(monitor);abort.signal.removeEventListener('abort',onAbort);abort.abort();if(adapter){const reports=await bounded(adapter.dispose());if(reports.some(r=>!cleanupAccepted(r,fence.runId)))throw workerError('CANCEL_CLEANUP_FAILED',fence);}}
  }
 };

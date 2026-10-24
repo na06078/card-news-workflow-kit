@@ -64,7 +64,7 @@ export async function startCheckpoint(){
   // 외부 요청만 거절. API 응답 fulfill/intercept/mock 없음.
   await context.route('**/*',route=>{const u=new URL(route.request().url());if(u.origin!==url){external.push(u.origin);return route.abort();}return route.continue();});
   page=await context.newPage();page.on('pageerror',e=>pageErrors.push(e.message));page.on('console',m=>{if(m.type()==='error')consoleErrors.push(m.text());});
-  await page.goto(url+host);await page.getByLabel('조사 주제',{exact:true}).fill('[I1 합성] 브라우저 생성');
+  await page.goto(url+host);await page.getByRole('button',{name:'새 프로젝트',exact:true}).click();await page.getByLabel('조사 주제',{exact:true}).fill('[I1 합성] 브라우저 생성');
   await page.getByRole('button',{name:'프로젝트 만들기',exact:true}).click();await page.getByRole('button',{name:'자료 조사 시작',exact:true}).waitFor();
   const id=new URL(page.url()).searchParams.get('project');assert(id);const a=await api();const created=await a.client.getProject(id);assert.equal(created.activeRun,null);record('browser-create',{projectId:id,noAutomaticResearch:true});
   const seeded=await candidates(a,id);await page.reload();await page.getByRole('heading',{name:'후보 선택',exact:true}).waitFor();

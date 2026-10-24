@@ -20,6 +20,7 @@ export function mutationPath(name:MutationName,target:MutationTarget):string {
 export function createHttpClient(options:{baseUrl?:string;fetch?:typeof fetch}={}):FrontendClient {
  const fetcher=options.fetch??globalThis.fetch.bind(globalThis);const base=options.baseUrl??'';
  let csrf:string|null=null;
+ let bootstrapRequest:Promise<ReturnType<typeof BootstrapSchema.parse>>|null=null;
  async function request<T>(path:string,schema:z.ZodType<T>,input?:unknown):Promise<T>{
   let response:Response;
   try { response=await fetcher(base+path,{method:input===undefined?'GET':'POST',credentials:'include',cache:'no-store',headers:input===undefined?{Accept:'application/json'}:{Accept:'application/json','Content-Type':'application/json','X-CSRF-Token':csrf??''},...(input===undefined?{}:{body:JSON.stringify(input)})}); }
@@ -30,7 +31,11 @@ export function createHttpClient(options:{baseUrl?:string;fetch?:typeof fetch}={
   if(!parsed.success)throw clientError('CLIENT_PROTOCOL_ERROR','CN-1 응답 형식이 일치하지 않습니다. 완료로 표시하지 않습니다.');
   return parsed.data.data;
  }
- async function bootstrap(){const b=await request('/api/bootstrap',BootstrapSchema);csrf=b.csrfToken;return b;}
+ async function bootstrap(){
+  // 초기 병렬 로딩의 쿠키와 CSRF가 서로 다른 세션으로 갈라지지 않도록 합칩니다.
+  if(!bootstrapRequest)bootstrapRequest=request('/api/bootstrap',BootstrapSchema).then(b=>{csrf=b.csrfToken;return b;}).finally(()=>{bootstrapRequest=null;});
+  return bootstrapRequest;
+ }
  async function post<T>(path:string,schema:z.ZodType<T>,input:unknown){if(!csrf)await bootstrap();return request(path,schema,input);}
  return {bootstrap,
   createProject:input=>post('/api/projects',CreateProjectResponseSchema,CreateProjectRequestSchema.parse(input)),

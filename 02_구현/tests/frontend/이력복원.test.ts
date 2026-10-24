@@ -35,9 +35,9 @@ it('20페이지씩 나눠 가져와 마지막 페이지까지 이력을 버리�
  const ctl=createController(c);await ctl.open(p.projectId);expect(n).toBe(20);expect(ctl.getState().historyMore).toBe(true);
  await ctl.poll();expect(n).toBe(23);expect(ctl.getState().events).toHaveLength(23);expect(ctl.getState().historyMore).toBe(false);
 });
-it('새 프로젝트로 전환한 뒤 이전 mutation 실패가 현재 화면 오류를 덮지 않는다',async()=>{
+it('요청 응답 대기 중 전환은 막고 원래 요청 오류를 보존한다',async()=>{
  const p=createMockSnapshot('selection'),other={...p,projectId:'22222222-2222-4222-8222-222222222222'};let reject!:(e:unknown)=>void;
  const c={bootstrap:vi.fn(),getProject:vi.fn(async(id:string)=>id===p.projectId?p:other),getEvents:vi.fn(async()=>({events:[],nextSeq:0,hasMore:false})),mutate:vi.fn(()=>new Promise((_,r)=>{reject=r;}))} as unknown as FrontendClient;
  const ctl=createController(c);await ctl.open(p.projectId);const sending=ctl.send('research');await ctl.open(other.projectId);reject(new Error('old failure'));await sending;
- expect(ctl.getState().error).toBeNull();expect(ctl.getState().pendingRetry).toBe(false);
+ expect(ctl.getState().snapshot?.projectId).toBe(p.projectId);expect(ctl.getState().error).not.toBeNull();expect(ctl.getState().pendingRetry).toBe(true);
 });

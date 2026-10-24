@@ -1,5 +1,6 @@
 import {ERROR_HTTP,type AppError,type ErrorCode,type NextAction} from '../shared/포트.js';
 const messages:Partial<Record<ErrorCode,string>>={
+ PROJECT_DELETING:'영구 삭제가 진행 중이거나 미완료입니다. 목록에서 삭제를 다시 확인해 주세요.',PROJECT_DELETE_FAILED:'프로젝트 영구 삭제를 완료하지 못했습니다. 파일 사용을 마친 뒤 같은 삭제 요청으로 다시 시도해 주세요.',
  VALIDATION_ERROR:'입력값을 확인해 주세요.',NOT_FOUND:'해당 프로젝트·작업·파일을 찾을 수 없습니다.',
  VERSION_CONFLICT:'현재 스냅샷을 다시 불러와 주세요.',QUESTION_STALE:'현재 질문을 다시 불러와 주세요.',REQUEST_ID_CONFLICT:'같은 요청 ID에 다른 입력이 있습니다. 새 요청 ID로 제출해 주세요.',
  RUN_ACTIVE:'이미 진행 중인 작업이 있습니다.',STAGE_CONFLICT:'현재 단계에서 허용하지 않는 요청입니다.',FINAL_NOT_APPROVED:'현재 결과를 먼저 최종 승인해 주세요.',EXPORT_STALE:'수정 전의 다운로드입니다. 현재 결과를 다시 승인해 주세요.',

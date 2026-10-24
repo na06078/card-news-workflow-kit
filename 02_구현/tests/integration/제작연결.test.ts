@@ -9,7 +9,7 @@ test('실제 기본 진입점에서 생성·선택·질문·HTTP 재시작·답�
  const context=await browser.newContext({viewport:{width:1440,height:1100},locale:'ko-KR',timezoneId:'Asia/Seoul',serviceWorkers:'block'});const external:string[]=[],errors:string[]=[];
  await context.route('**/*',r=>new URL(r.request().url()).origin===h.url?r.continue():(external.push(r.request().url()),r.abort()));const page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));
  try {
-  await page.goto(h.url);await page.getByLabel('조사 주제',{exact:true}).fill('[I2 합성] 전체 로컬 흐름');await page.getByRole('button',{name:'프로젝트 만들기',exact:true}).click();await page.getByRole('button',{name:'자료 조사 시작',exact:true}).waitFor();
+  await page.goto(h.url);await page.getByRole('button',{name:'새 프로젝트',exact:true}).click();await page.getByLabel('조사 주제',{exact:true}).fill('[I2 합성] 전체 로컬 흐름');await page.getByRole('button',{name:'프로젝트 만들기',exact:true}).click();await page.getByRole('button',{name:'자료 조사 시작',exact:true}).waitFor();
   const id=new URL(page.url()).searchParams.get('project')!;expect(id).toBeTruthy();const a=await h.api();expect((await a.client.getProject(id)).activeRun).toBeNull();
   await page.getByRole('button',{name:'자료 조사 시작',exact:true}).click();await h.waitFor(id,p=>!!p.activeRun);await h.worker.tick();await page.reload();await page.getByRole('heading',{name:'후보 선택',exact:true}).waitFor();
   expect(await page.getByRole('checkbox').count()).toBe(7);await page.getByRole('checkbox').nth(0).check();await page.getByRole('button',{name:'선택한 후보로 진행',exact:true}).click();await h.waitFor(id,p=>p.activeRun?.kind==='editorial');

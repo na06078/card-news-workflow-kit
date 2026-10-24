@@ -6,6 +6,7 @@
 import type { Express } from 'express';
 import type { ReactElement } from 'react';
 import type * as C from './계약.js';
+import type {ProjectList,ModelSelectionRequest,ModelSelectionResponse,DeleteProjectRequest,DeleteProjectResponse} from './작업공간계약.js';
 export * from './계약.js';
 export * from './검증.js';
 export type DeepReadonly<T> = T extends (...args:never[])=>unknown ? T : T extends readonly (infer U)[] ? readonly DeepReadonly<U>[] : T extends object ? {readonly [K in keyof T]:DeepReadonly<T[K]>} : T;
@@ -45,7 +46,10 @@ export type WorkerCommit =
  * B1이 상태 전이/부분수정의 불변 manifest·비대상 승인 보존을 구현합니다.
  */
 export interface Store {
-  createProject(input:C.CreateProjectRequest):Promise<HttpReply<{projectId:string;projectVersion:number}>>;
+  deleteProject(projectId:string,input:DeleteProjectRequest):Promise<HttpReply<DeleteProjectResponse>>;
+  listProjects():Promise<ProjectList>;
+  setProjectModel(projectId:string,input:ModelSelectionRequest,validateModel?:(model:string|null)=>void):Promise<HttpReply<ModelSelectionResponse>>;
+  createProject(input:C.CreateProjectRequest,validateModel?:(model:string|null)=>void):Promise<HttpReply<{projectId:string;projectVersion:number}>>;
   mutate<K extends C.MutationName>(name:K,target:MutationTarget,input:C.RequestByMutation[K]):Promise<HttpReply<C.ResponseByMutation[K]>>;
   getProject(projectId:string):Promise<C.ProjectSnapshot>;
   getRun(runId:string):Promise<C.Run>;
@@ -71,7 +75,7 @@ export interface Store {
   reconcile(input:{now:string}):Promise<{interruptedRunIds:string[];orphanAssetIds:string[]}>;
   close():Promise<void>;
 }
-export type StoreOptions = {dbPath:string;dataDir:string;dataMode:DataMode;clock?:Clock;idFactory?:IdFactory;busyTimeoutMs?:number};
+export type StoreOptions = {dbPath:string;dataDir:string;dataMode:DataMode;clock?:Clock;idFactory?:IdFactory;busyTimeoutMs?:number;deleteProjectFiles?:(dataDir:string,projectId:string)=>Promise<void>};
 /** B1 src/backend/저장소.ts */
 export type CreateStore = (options:StoreOptions)=>Promise<Store>;
 export type AppOptions = {store:Store;dataDir:string;allowedOrigins:readonly string[];allowedHosts:readonly string[];staticDir?:string;clock?:Clock};

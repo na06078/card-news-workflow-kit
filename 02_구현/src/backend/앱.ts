@@ -2,9 +2,21 @@ import express,{type ErrorRequestHandler} from 'express';import {ZodError}from'z
 import * as C from '../shared/포트.js';import {localSecurity}from'./보안.js';import {DomainError,requireThat as must}from'./도메인.js';
 import type {ConnectionService} from './연결.js';
 import {ConnectionProviderSchema,ConnectionRequestSchema,ConnectionCancelRequestSchema,ConnectionCodeRequestSchema} from '../shared/연결계약.js';
-export const createApp=(options:C.AppOptions & {connections?:ConnectionService})=>{
+import {ModelSelectionRequestSchema,ProviderRefreshRequestSchema,DeleteProjectRequestSchema,type ProviderService} from '../shared/작업공간계약.js';
+class ProviderHttpError extends Error {
+ constructor(readonly status:number,readonly code:string){super(code);}
+}
+export const createApp=(options:C.AppOptions & {connections?:ConnectionService;providers?:ProviderService})=>{
  const app=express();app.disable('x-powered-by');app.set('trust proxy',false);app.use(localSecurity(options));app.use(express.json({limit:'256kb',strict:true}));
  const connections=options.connections;
+ const providerCall=<T>(fn:()=>T):T=>{try{return fn();}catch(error){
+  const e=error as {status?:unknown;code?:unknown};
+  if(e?.status===422&&e.code==='MODEL_UNAVAILABLE')throw new ProviderHttpError(422,'MODEL_UNAVAILABLE');
+  throw new ProviderHttpError(503,'MODEL_CATALOG_UNAVAILABLE');
+ }};
+ const assertModel=(model:string|null)=>{if(model===null)return;if(!options.providers)throw new ProviderHttpError(503,'MODEL_CATALOG_UNAVAILABLE');providerCall(()=>options.providers!.assertModel(model));};
+ app.get('/api/providers/status',(_req,res)=>res.json({data:options.providers?providerCall(()=>options.providers!.status()):{refreshing:false,models:{status:'unknown',checkedAt:null,models:[],error:null},providers:[{provider:'claude',label:'Claude',status:'unknown',checkedAt:null,metrics:[],message:null},{provider:'agy',label:'Antigravity',status:'unknown',checkedAt:null,metrics:[],message:null}]}}));
+ app.post('/api/providers/refresh',(req,res)=>{const input=ProviderRefreshRequestSchema.parse(req.body);if(connections?.busy())throw new DomainError('RUN_ACTIVE');if(!options.providers)throw new ProviderHttpError(503,'MODEL_CATALOG_UNAVAILABLE');res.status(202).json({data:providerCall(()=>options.providers!.refresh(input.requestId))});});
  if(connections){
   app.get('/api/connections',(_req,res)=>res.json({data:connections.list()}));
   for(const action of ['check','login','cancel','code'] as const)app.post(`/api/connections/:provider/${action}`,(req,res)=>{
@@ -17,7 +29,10 @@ export const createApp=(options:C.AppOptions & {connections?:ConnectionService})
  }
  const param=(v:unknown)=>C.IdSchema.parse(v);
  const reply=(res:express.Response,out:C.HttpReply<unknown>)=>{if(out.replayed)res.set('Idempotency-Replayed','true');res.status(out.status).json(out.body);};
- app.post('/api/projects',async(req,res)=>reply(res,await options.store.createProject(C.CreateProjectRequestSchema.parse(req.body))));
+ app.get('/api/projects',async(_req,res)=>res.json({data:await options.store.listProjects()}));
+ app.post('/api/projects',async(req,res)=>reply(res,await options.store.createProject(C.CreateProjectRequestSchema.parse(req.body),assertModel)));
+ app.post('/api/projects/:id/model',async(req,res)=>reply(res,await options.store.setProjectModel(param(req.params.id),ModelSelectionRequestSchema.parse(req.body),assertModel)));
+ app.post('/api/projects/:id/delete',async(req,res)=>reply(res,await options.store.deleteProject(param(req.params.id),DeleteProjectRequestSchema.parse(req.body))));
  app.get('/api/projects/:id',async(req,res)=>res.json({data:await options.store.getProject(param(req.params.id))}));
  for(const name of ['research','selection','answers','approve','revisions']as const)app.post(`/api/projects/:id/${name}`,async(req,res)=>reply(res,await options.store.mutate(name,{projectId:param(req.params.id)},C.RequestSchemas[name].parse(req.body))));
  app.post('/api/projects/:id/cards/:cardId/approve',async(req,res)=>reply(res,await options.store.mutate('cardApprove',{projectId:param(req.params.id),cardId:param(req.params.cardId)},C.CardApproveRequestSchema.parse(req.body))));
@@ -31,6 +46,7 @@ export const createApp=(options:C.AppOptions & {connections?:ConnectionService})
  if(options.staticDir)app.use(express.static(options.staticDir,{dotfiles:'deny',fallthrough:true,index:'index.html'}));
  app.use((_req,_res,next)=>next(new DomainError('NOT_FOUND')));
  const errors:ErrorRequestHandler=(err,_req,res,_next)=>{
+  if(err instanceof ProviderHttpError){res.status(err.status).json({error:{code:err.code,message:err.status===422?'현재 계정에서 지원하지 않는 모델입니다.':'모델 목록을 확인할 수 없습니다. 공급자 상태를 새로고침해 주세요.',retryable:err.status===503,nextActions:err.status===503?['retry']:[],projectId:null,runId:null,currentVersion:null,details:{}}});return;}
   if(err instanceof DomainError){res.status(err.status).json({error:err.error});return;}
   if(err instanceof ZodError){const e=new DomainError('VALIDATION_ERROR');e.error.details={field:err.issues[0]?.path.join('.')||'body'};res.status(e.status).json({error:e.error});return;}
   const code=err?.type==='entity.too.large'?'PAYLOAD_TOO_LARGE':err?.type==='entity.parse.failed'?'INVALID_JSON':err?.code==='SQLITE_BUSY'?'STORAGE_BUSY':null;

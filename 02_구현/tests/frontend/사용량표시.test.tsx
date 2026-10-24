@@ -1,0 +1,8 @@
+import '@testing-library/jest-dom/vitest';
+import {it,expect,afterEach} from 'vitest';
+import {render,screen,cleanup} from '@testing-library/react';
+import {사용량패널} from '../../src/frontend/컴포넌트/사용량패널.js';
+afterEach(cleanup);
+it('조회 실패는 이전 숫자를 유지하면서 오래된 값임을 표시한다',()=>{render(<사용량패널 error="통신 실패" refresh={()=>{}} data={{refreshing:false,models:{status:'ready',checkedAt:null,models:[],error:null},providers:[{provider:'claude',label:'Claude',status:'ready',checkedAt:new Date().toISOString(),message:null,metrics:[{id:'weekly',label:'주간',remainingPercent:0,resetsAt:null,scope:'account',source:'SDK'}]}]}}/>);expect(screen.getAllByText('0%')[0]).toBeVisible();expect(screen.getByText(/이전 조회값/)).toBeVisible();expect(screen.getByText('잔여량 미확인')).toBeVisible();});
+
+it('주요 네 게이지는 상세 밖에 항상 보이고 나머지 범위만 접는다',()=>{const metric=(id:string,label:string)=>({id,label,remainingPercent:42,resetsAt:null,scope:'account' as const,source:'SDK'});render(<사용량패널 error="" refresh={()=>{}} data={{refreshing:false,models:{status:'ready',checkedAt:null,models:[],error:null},providers:[{provider:'claude',label:'Claude',status:'ready',checkedAt:new Date().toISOString(),message:null,metrics:[metric('five','5시간'),metric('week','주간'),metric('extra','기타 모델')]},{provider:'agy',label:'Antigravity',status:'ready',checkedAt:new Date().toISOString(),message:null,metrics:[metric('gemini-five','Gemini Models · 5시간'),metric('gemini-week','Gemini Models · 주간'),metric('argon','Gemini 4 Argon')]}]}}/>);const meters=screen.getAllByRole('meter');expect(meters.filter(m=>!m.closest('details'))).toHaveLength(4);expect(screen.getByText('사용량 상세').closest('details')).not.toHaveAttribute('open');});
