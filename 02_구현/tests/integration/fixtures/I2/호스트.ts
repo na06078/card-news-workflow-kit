@@ -15,9 +15,9 @@ import {createHttpClient} from '../../../../src/frontend/클라이언트.js';
 import type * as C from '../../../../src/shared/포트.js';
 
 /** TEST ONLY: 실제 B1/W1/R1/F1 + 명시 합성 외부 응답. 기본 앱에서 import 금지. */
-export async function startLocal(){
+export async function startLocal(testOptions:{dataRoot?:string;createClaudeAdapter?:C.CreateClaudeAdapter;createSemanticReviewer?:C.CreateSemanticReviewer}={}){
  if(process.env.CARDNEWS_LIVE_CALLS!=='forbidden')throw Error('TEST_OPT_IN_REQUIRED');
- const data=resolve('실행데이터/I2',randomUUID());await mkdir(data,{recursive:true});
+ const data=resolve(testOptions.dataRoot??'실행데이터/I2',randomUUID());await mkdir(data,{recursive:true});
  const dbPath=resolve(data,'통합.sqlite');const store=await createStore({dataDir:data,dbPath,dataMode:'mock'});
  const hosts:string[]=[],origins:string[]=[];let backend=createApp({store,dataDir:data,allowedHosts:hosts,allowedOrigins:origins});
  const records:unknown[]=[],network:unknown[]=[];const record=(name:string,evidence:unknown)=>records.push({name,evidence});
@@ -56,7 +56,7 @@ export async function startLocal(){
   },answer:async()=>{},status:id=>store.getRun(id),cancel:async id=>({runId:id,status:'confirmed',verifiedAt:new Date().toISOString(),reason:'I2_TEST_DOUBLE_NO_PROCESS',children:[]}),dispose:async()=>[]
  });
  const syntheticAgy:C.AgyAdapter={...agy,async generate(i,s){const out=await agy.generate(i,s);const provenance={...out.provenance,usageConditions:'I2 합성 PNG: 이 fixture가 직접 만든 단색 픽셀만 사용. 실제 agy 약관 검증 아님.',usageConditionsVerified:true};return {...out,provenance,asset:{...out.asset,provenance}};}};
- const workerOptions:C.WorkerOptions={store,dataDir:data,ownerId:randomUUID(),dataMode:'mock',createClaudeAdapter,claudeOptions:{livePermission:{inference:false,search:false,image:false}},agy:syntheticAgy,renderCard:(i,o)=>renderCard(i,{...o,browserExecutablePath:resolve('.브라우저/chromium-1248/chrome-win64/chrome.exe')}),buildExport,font:{family:'Noto Sans KR',absolutePath:resolve('assets/render/NotoSansKR.woff2'),licenseAssetId:randomUUID()},fontLicensePath:resolve('assets/render/OFL.txt'),heartbeatMs:100,pollMs:10,leaseMs:30000};
+ const workerOptions:C.WorkerOptions={store,dataDir:data,ownerId:randomUUID(),dataMode:'mock',createClaudeAdapter:testOptions.createClaudeAdapter??createClaudeAdapter,claudeOptions:{livePermission:{inference:false,search:false,image:false}},createSemanticReviewer:testOptions.createSemanticReviewer,reviewerOptions:{livePermission:{inference:false}},agy:syntheticAgy,renderCard:(i,o)=>renderCard(i,{...o,browserExecutablePath:resolve('.브라우저/chromium-1248/chrome-win64/chrome.exe')}),buildExport,font:{family:'Noto Sans KR',absolutePath:resolve('assets/render/NotoSansKR.woff2'),licenseAssetId:randomUUID()},fontLicensePath:resolve('assets/render/OFL.txt'),heartbeatMs:100,pollMs:10,leaseMs:30000};
  let worker=createWorker(workerOptions);
  const vite=await createViteServer({configFile:false,root:process.cwd(),cacheDir:resolve(data,'vite-cache'),plugins:[react()],logLevel:'error',server:{middlewareMode:true,hmr:false,watch:{ignored:['**/실행데이터/**','**/.도구/**','**/.브라우저/**']}},optimizeDeps:{noDiscovery:true,include:['react','react-dom/client','react/jsx-runtime','zod']}});
  const outer=express();outer.use((req,res,next)=>{if(!req.url.startsWith('/api/'))return next();res.on('finish',()=>network.push({method:req.method,path:req.url,status:res.statusCode,replayed:res.getHeader('Idempotency-Replayed')??false}));return backend(req,res,next);});outer.use(vite.middlewares);

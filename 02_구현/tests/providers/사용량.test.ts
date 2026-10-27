@@ -1,4 +1,6 @@
 import {describe,it,expect,vi} from 'vitest';
+vi.mock('node:child_process',()=>({spawn:vi.fn(()=>{throw Error('UNMOCKED_NATIVE');})}));
+vi.mock('@anthropic-ai/claude-agent-sdk',()=>({query:vi.fn(()=>{throw Error('UNMOCKED_SDK');})}));
 import {parseClaudeUsage,parseAgyUsage,parseModels,readProviderMetadata} from '../../src/providers/사용량.js';
 import {EventEmitter} from 'node:events';
 import {PassThrough} from 'node:stream';

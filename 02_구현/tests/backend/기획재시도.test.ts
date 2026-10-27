@@ -90,10 +90,11 @@ test.each([
   if(scenario.interrupted)await f.s.reconcile({now:'2026-10-23T00:01:00.000Z'});
   else await f.s.commit(fence,{type:'failure',error:new DomainError(scenario.code,f.target.projectId).error,externalOutcome:'unknown',retryAllowed:true});
   const before=await f.s.getProject(f.target.projectId);
-  expect((await f.s.mutate('retry',{...f.target,runId:f.j.run.runId},{requestId:randomUUID(),version:before.projectVersion,confirmUnknownOutcome:true})).status).toBe(202);
-  const next=await f.claim();expect(next.context?.engineSessionId).toBe('과거-검증안된-세션');
-  let error:unknown;try{assertRecoverySupported(next.context!,next.fence);}catch(e){error=e;}
-  expect(error).toMatchObject({code:'SESSION_RECOVERY_UNVERIFIED'});
+  const reply=await f.s.mutate('retry',{...f.target,runId:f.j.run.runId},{requestId:randomUUID(),version:before.projectVersion,confirmUnknownOutcome:true});
+  if(scenario.kind==='research'){expect(reply.status).toBe(409);expect(before.lastRun?.retryAllowed).toBe(false);expect(before.allowedActions).not.toContain('retry');expect(await f.s.claimJob({ownerId:randomUUID(),now:at,leaseMs:30000,dataMode:'mock'})).toBeNull();return;}
+  expect(reply).toMatchObject({status:409,body:{error:{code:'SESSION_RECOVERY_UNVERIFIED'}}});
+  expect(before.lastRun?.retryAllowed).toBe(false);expect(before.allowedActions).not.toContain('retry');
+  expect(await f.s.claimJob({ownerId:randomUUID(),now:at,leaseMs:30000,dataMode:'mock'})).toBeNull();
  }finally{await f.close();}
 });
 
@@ -114,9 +115,7 @@ test('권한 실패가 조상에만 있으면 직접 부모의 다른 오류 복
   const second=await f.claim();expect(second.context?.engineSessionId).toBeNull();
   await f.s.commit(second.fence,{type:'failure',error:new DomainError('AUTH_PATH_FORBIDDEN').error,externalOutcome:'unknown',retryAllowed:true});
   p=await f.s.getProject(f.target.projectId);
-  await f.s.mutate('retry',{...f.target,runId:second.run.runId},{requestId:randomUUID(),version:p.projectVersion,confirmUnknownOutcome:true});
-  const third=await f.claim();expect(third.run.attempt).toBe(3);expect(third.context?.engineSessionId).toBe('과거-검증안된-세션');
-  let error:unknown;try{assertRecoverySupported(third.context!,third.fence);}catch(e){error=e;}
-  expect(error).toMatchObject({code:'SESSION_RECOVERY_UNVERIFIED'});
+  expect(await f.s.mutate('retry',{...f.target,runId:second.run.runId},{requestId:randomUUID(),version:p.projectVersion,confirmUnknownOutcome:true})).toMatchObject({status:409,body:{error:{code:'SESSION_RECOVERY_UNVERIFIED'}}});
+  expect(await f.s.claimJob({ownerId:randomUUID(),now:at,leaseMs:30000,dataMode:'mock'})).toBeNull();
  }finally{await f.close();}
 });

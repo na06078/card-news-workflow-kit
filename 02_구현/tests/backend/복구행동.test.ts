@@ -1,0 +1,2 @@
+import {test,expect} from 'vitest';import {randomUUID} from 'node:crypto';import {setup} from './도움.js';
+test('복구 공개 행동은 사실 재확인/별도 적용/내보내기 재구축을 현재 조건에만 노출한다',async()=>{const {s,target}=await setup('1080x1080',[{text:'미확인 주장',sourceIds:[],kind:'uncertain',availability:'unknown',conditions:[]}]);try{const p=await s.getProject(target.projectId);expect(p.allowedActions).toContain('reverify_facts');expect(p.allowedActions).not.toContain('apply_fact_proposal');expect(p.allowedActions).not.toContain('rebuild_exports');}finally{await s.close();}});

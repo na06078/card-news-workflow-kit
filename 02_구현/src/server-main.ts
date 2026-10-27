@@ -16,9 +16,13 @@ export async function startServer(options:{dataDir?:string;port?:number;staticDi
  const dataDir=resolve(options.dataDir??'실행데이터/앱');
  const store=options.store??await createStore({dataDir,dbPath:resolve(dataDir,'카드뉴스.sqlite'),dataMode:'real'});
  let appRoot=dirname(fileURLToPath(import.meta.url));while(!existsSync(resolve(appRoot,'package.json'))){const parent=dirname(appRoot);if(parent===appRoot)throw Error('APP_ROOT_NOT_FOUND');appRoot=parent;}
- const connections=options.connections??createConnectionService({runner:createNativeConnectionRunner({appRoot,cwd:dataDir}),hasActiveRuns:()=>hasActiveConnectionRuns(resolve(dataDir,'카드뉴스.sqlite'))});
  // 조회 서비스 생성 자체는 외부 통신하지 않습니다. 명시 refresh가 메타데이터만 가져옵니다.
  const providers=options.providers??createProviderService({reader:signal=>readProviderMetadata({appRoot,cwd:dataDir,signal})});
+ const connections=options.connections??createConnectionService({
+  runner:createNativeConnectionRunner({appRoot,cwd:dataDir}),
+  hasActiveRuns:()=>hasActiveConnectionRuns(resolve(dataDir,'카드뉴스.sqlite')),
+  onAuthChanged:()=>providers.invalidate?.(),
+ });
  const hosts=['127.0.0.1:5173'],origins=['http://127.0.0.1:5173'];
  const app=createApp({store,connections,providers,dataDir,allowedHosts:hosts,allowedOrigins:origins,staticDir:options.staticDir??resolve('dist/web')});
  let server:ReturnType<typeof app.listen>;

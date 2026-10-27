@@ -1,5 +1,6 @@
 import {describe,it,expect,vi} from 'vitest';
 import {createController,versionFor,canFinalApprove} from '../../src/frontend/상태.js';
+import {의미검수대역} from './의미검수대역.js';
 import {createMockSnapshot,MOCK_IDS} from '../../src/shared/모의자료.js';
 import type {FrontendClient} from '../../src/shared/포트.js';
 function client(){return {bootstrap:vi.fn(async()=>({csrfToken:'x',contractVersion:'CN-1' as const})),getProject:vi.fn(async()=>createMockSnapshot('selection')),mutate:vi.fn(),getEvents:vi.fn(async()=>({events:[],nextSeq:0,hasMore:false})),getExports:vi.fn(),createProject:vi.fn(),getRun:vi.fn()} as unknown as FrontendClient;}
@@ -25,6 +26,6 @@ describe('원장 기반 화면 상태',()=>{
  });
  it('대상별 버전을 사용하며 facts/visual 검사와 최종 승인을 구분한다',()=>{
   const p=createMockSnapshot('review');expect(versionFor(p,'selection')).toBe(p.researchVersion);expect(versionFor(p,'approve',{stage:'final'})).toBe(p.result?.version);
-  expect(canFinalApprove(p)).toBe(true);p.result!.visualCheck='pending';expect(canFinalApprove(p)).toBe(false);
+  expect(canFinalApprove(p)).toBe(false);p.result!.semanticReview=의미검수대역(p);expect(canFinalApprove(p)).toBe(true);p.result!.visualCheck='pending';expect(canFinalApprove(p)).toBe(false);
  });
 });

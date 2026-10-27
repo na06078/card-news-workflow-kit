@@ -33,9 +33,14 @@ export function trackOwnedChild(child:ChildProcess,testOptions?:{probe:(pid:numb
   let exitConfirmed=exited;
   if(!exited&&identityVerified){
    const current=await probe(child.pid!).catch(()=>null);
-   identityVerified=current?current.pid===original!.pid&&current.parentPid===original!.parentPid&&current.createdAt===original!.createdAt&&resolve(current.executablePath).toLowerCase()===resolve(original!.executablePath).toLowerCase():null;
-   if(identityVerified&&!exited){try{child.kill('SIGTERM');await bounded(closed,testOptions?.graceMs??10000);exitConfirmed=true;}catch{exitConfirmed=exited;}}
-   else exitConfirmed=exited;
+   // CIM 재조회보다 자연 종료가 빠르면 held ChildProcess의 close가 이미 종료를 증명합니다.
+   // 최초 확인한 신원을 보존하되, 살아 있는 PID는 여전히 재검증 없이 신호를 보내지 않습니다.
+   if(exited)exitConfirmed=true;
+   else{
+    identityVerified=current?current.pid===original!.pid&&current.parentPid===original!.parentPid&&current.createdAt===original!.createdAt&&resolve(current.executablePath).toLowerCase()===resolve(original!.executablePath).toLowerCase():null;
+    if(identityVerified&&!exited){try{child.kill('SIGTERM');await bounded(closed,testOptions?.graceMs??10000);exitConfirmed=true;}catch{exitConfirmed=exited;}}
+    else exitConfirmed=exited;
+   }
   }
   const descendantsConfirmed=identityVerified&&exitConfirmed?await descendants():null;
   return {pid:child.pid??null,parentPid:original?.parentPid??null,executablePath:original?.executablePath??null,createdAt:original?.createdAt??null,identityVerified,exitConfirmed,descendantsConfirmed,evidence:testOptions?'test_double':original?'actual_os':'unverified'};

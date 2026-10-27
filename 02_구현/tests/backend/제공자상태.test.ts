@@ -1,4 +1,6 @@
 import {it,expect,vi} from 'vitest';
+vi.mock('node:child_process',()=>({spawn:vi.fn(()=>{throw Error('UNMOCKED_NATIVE');})}));
+vi.mock('@anthropic-ai/claude-agent-sdk',()=>({query:vi.fn(()=>{throw Error('UNMOCKED_SDK');})}));
 import {createProviderService} from '../../src/backend/제공자상태.js';
 import type {ProviderReading} from '../../src/shared/작업공간계약.js';
 const good:ProviderReading={models:{status:'ready',checkedAt:'2026-10-24T00:00:00.000Z',models:[{value:'sonnet',displayName:'Sonnet',description:''}],error:null},providers:[{provider:'claude',label:'Claude',status:'ready',checkedAt:'2026-10-24T00:00:00.000Z',metrics:[{id:'five_hour',label:'5시간',remainingPercent:75,resetsAt:null,scope:'account',source:'SDK'}],message:null}]};
@@ -27,3 +29,23 @@ it('reads only on refresh, dedupes busy requests and preserves stale success on 
  finish(good);await flush();expect(service.status().models.status).toBe('ready');expect(()=>service.assertModel('sonnet')).not.toThrow();expect(()=>service.assertModel('other')).toThrow();
  reader.mockRejectedValueOnce(new Error('secret@example.com'));service.refresh('three');await flush();expect(service.status().providers[0].metrics[0].remainingPercent).toBe(75);expect(service.status().providers[0].checkedAt).toBe(good.providers[0].checkedAt);expect(service.status().models.status).toBe('error');expect(JSON.stringify(service.status())).not.toContain('secret');expect(()=>service.assertModel('sonnet')).toThrow();expect(()=>service.assertModel(null)).not.toThrow();await service.dispose();
 });
+
+it('auth invalidation clears old models/quotas, aborts and ignores every old-generation outcome',async()=>{
+ const requests:Array<{signal?:AbortSignal;resolve:(v:ProviderReading)=>void;reject:(e:Error)=>void}>=[];
+ const reader=vi.fn((signal?:AbortSignal)=>new Promise<ProviderReading>((resolve,reject)=>requests.push({signal,resolve,reject})));
+ const service=createProviderService({reader});service.refresh('initial');await flush();requests[0].resolve(good);await flush();
+ expect(service.status().models.status).toBe('ready');
+ service.refresh('old');await flush();service.invalidate!();
+ expect(requests[1].signal?.aborted).toBe(true);
+ expect(service.status()).toMatchObject({refreshing:false,models:{status:'unknown',checkedAt:null,models:[],error:null},providers:[{status:'unknown',checkedAt:null,metrics:[]},{status:'unknown',checkedAt:null,metrics:[]}]});
+ expect(()=>service.assertModel('sonnet')).toThrow();
+ service.refresh('new');await flush();requests[1].resolve(good);await flush();
+ expect(service.status().refreshing).toBe(true);expect(service.status().models.models).toEqual([]);
+ service.refresh('dedup');await flush();expect(reader).toHaveBeenCalledTimes(3);
+ requests[2].resolve({...good,models:{...good.models,models:[{value:'new',displayName:'New',description:''}]}});await flush();
+ expect(service.status().models.models[0].value).toBe('new');
+ service.refresh('old-error');await flush();service.invalidate!();service.refresh('newer');await flush();requests[3].reject(Error('OLD'));await flush();
+ expect(service.status()).toMatchObject({refreshing:true,models:{status:'unknown',models:[]}});
+ requests[4].resolve(good);await flush();await service.dispose();
+});
+

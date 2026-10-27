@@ -42,10 +42,12 @@ describe('복원·충돌·오류 화면',()=>{
   const p=createMockSnapshot('selection');p.candidates=[];p.sources=[];render(<App client={createMockClient(p)} initialProjectId={MOCK_IDS.project}/>);
   expect(await screen.findByRole('button',{name:'선택한 후보로 진행'})).toBeDisabled();expect(screen.getByText(/후보가 없습니다/)).toBeVisible();
  });
- it('per-card 실패에서 해당 실패 작업 재시도를 제공한다',async()=>{
+ it('실패 카드에서도 카드 하나로 오인하지 않게 작업 전체 범위 재시도를 제공한다',async()=>{
   const p=interrupted();p.lastRun!.externalOutcome='known';p.lastRun!.status='failed';p.result!.cards[0]!.state='failed';p.result!.cards[0]!.error=fault('IMAGE_GENERATION_FAILED').error as NonNullable<ProjectSnapshot['lastRun']>['error'];
-  render(<App client={createMockClient(p)} initialProjectId={MOCK_IDS.project}/>);
-  const retry=await screen.findByRole('button',{name:'카드 1 실패 작업 재시도'});expect(retry).toBeEnabled();
+  const client=createMockClient(p),mutate=vi.spyOn(client,'mutate');render(<App client={client} initialProjectId={MOCK_IDS.project}/>);
+  const retry=await screen.findByRole('button',{name:'실패 작업 전체 범위 재시도 (카드 1만 아님)'});expect(retry).toBeEnabled();
+  await userEvent.setup().click(retry);
+  expect(mutate).toHaveBeenCalledWith('retry',expect.objectContaining({projectId:MOCK_IDS.project,runId:MOCK_IDS.run}),expect.objectContaining({version:p.projectVersion}));
  });
  it('출력 크기 답변 완료 질문이 남아 있어도 후보 선택을 막지 않는다',async()=>{
   const p=createMockSnapshot('question');p.question!.status='answered';p.activeRun=null;p.lastRun=null;p.stage='selection';p.allowedActions=['select'];

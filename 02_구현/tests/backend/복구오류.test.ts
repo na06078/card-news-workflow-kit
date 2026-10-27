@@ -1,0 +1,2 @@
+import {test,expect} from 'vitest';import {DomainError} from '../../src/backend/도메인.js';
+test.each([['FACT_REVIEW_FAILED',502,'재검증'],['FACT_PROPOSAL_STALE',409,'제안'],['FACT_SCOPE_INVALID',422,'선택'],['WORKER_UNAVAILABLE',503,'작업자']] as const)('%s 오류는 안전한 한국어 원인과 복구 행동을 제공한다',(code,status,text)=>{const e=new DomainError(code);expect(e.status).toBe(status);expect(e.error.message).toContain(text);expect(e.error.nextActions.length).toBeGreaterThan(0);});

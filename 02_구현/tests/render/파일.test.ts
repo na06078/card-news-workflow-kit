@@ -1,4 +1,8 @@
-import {test,expect} from 'vitest';
+import {test,expect,beforeEach,afterEach} from 'vitest';
+import {singleBrowser} from './단일브라우저.js';
+let monitor:ReturnType<typeof singleBrowser>;
+beforeEach(()=>{monitor=singleBrowser();});
+afterEach(()=>{monitor.restore();});
 import {readFile,writeFile,rm,symlink} from 'node:fs/promises';
 import {resolve} from 'node:path';
 import {randomUUID} from 'node:crypto';
@@ -36,7 +40,7 @@ test('텍스트 수정은 원본 배경 해시를 재사용하고 입력 버전�
 
 test('과도하게 긴 한국어 제목·본문은 자동 잘림 대신 구조화된 overflow 오류를 낸다',async()=>{
  const i=await fixture('TEST-넘침');i.card.title='긴 한국어 제목입니다 '.repeat(50);i.card.body='너무 긴 본문과 조건 '.repeat(100);
- await expect(renderCard(i)).rejects.toMatchObject({error:{code:'RENDER_FAILED',details:{reason:expect.stringContaining('레이아웃')}}});
+ await expect(renderCard(i)).rejects.toMatchObject({error:{code:'RENDER_FAILED',details:{reason:'TEXT_OVERFLOW'}}});
  await expect(readFile(i.outputPath)).rejects.toMatchObject({code:'ENOENT'});
 },30000);
 

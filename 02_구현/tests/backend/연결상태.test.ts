@@ -1,4 +1,6 @@
 import {test,expect,vi} from 'vitest';
+vi.mock('node:child_process',()=>({spawn:vi.fn(()=>{throw Error('UNMOCKED_NATIVE');})}));
+vi.mock('@anthropic-ai/claude-agent-sdk',()=>({query:vi.fn(()=>{throw Error('UNMOCKED_SDK');})}));
 import {randomUUID} from 'node:crypto';
 import type {NativeResult,NativeEvent} from '../../src/backend/연결.js';
 import {createConnectionService} from '../../src/backend/연결.js';

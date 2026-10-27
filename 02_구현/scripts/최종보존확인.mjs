@@ -1,0 +1,13 @@
+import Database from 'better-sqlite3';
+import {readFile,writeFile} from 'node:fs/promises';
+import {createHash} from 'node:crypto';
+import {resolve,relative,isAbsolute} from 'node:path';
+const base='http://127.0.0.1:5173',data=resolve('실행데이터/앱'),root=resolve('실행데이터/실사용검수복구'),baseline=JSON.parse(await readFile(resolve(root,'35f91d37-6ab4-415a-9a20-e1dab991441b/보존기준.json'),'utf8'));
+const protect=p=>({topic:p.topic,period:p.period,researchVersion:p.researchVersion,candidates:p.candidates,selectedCandidateIds:p.selectedCandidateIds,storyboard:p.storyboard,result:p.result,claims:p.claims,sources:p.sources,exports:p.exports,claudeModel:p.claudeModel,modelSettingsVersion:p.modelSettingsVersion});
+const hash=x=>createHash('sha256').update(x).digest('hex'),boot=await fetch(base+'/api/bootstrap',{headers:{Origin:base}}),cookie=boot.headers.getSetCookie().map(x=>x.split(';')[0]).join('; '),unchanged={};
+let target;for(const id of Object.keys(baseline.protectedHashes)){const response=await fetch(base+'/api/projects/'+id,{headers:{Origin:base,Cookie:cookie}});if(!response.ok)throw Error('SNAPSHOT_READ_FAILED');const p=(await response.json()).data;unchanged[id]=hash(JSON.stringify(protect(p)))===baseline.protectedHashes[id];if(id===baseline.projectId)target=p;}
+const beforeAssets=JSON.parse(await readFile(resolve(root,'적용후_무결성.json'),'utf8')).assets,actualAssets={},db=new Database(resolve(data,'카드뉴스.sqlite'),{readonly:true});
+try{for(const a of db.prepare('SELECT id,path FROM assets').all()){const file=isAbsolute(a.path)?resolve(a.path):resolve(data,a.path),rel=relative(data,file);if(rel.startsWith('..')||isAbsolute(rel))throw Error('ASSET_OUTSIDE_ROOT');actualAssets[a.id]=hash(await readFile(file));}
+ const sameAssets=Object.keys(actualAssets).length===Object.keys(beforeAssets).length&&Object.entries(beforeAssets).every(([id,sha])=>actualAssets[id]===sha),quickCheck=db.pragma('quick_check',{simple:true}),active=db.prepare("SELECT count(*) n FROM runs WHERE status IN ('queued','running','waiting_for_user','cancel_requested')").get().n;
+ const result={contentUnchanged:Object.values(unchanged).every(Boolean),unchanged,assetCount:Object.keys(actualAssets).length,assetsUnchanged:sameAssets,quickCheck,active,projectVersion:target.projectVersion,resultVersion:target.result.version,storyboardVersion:target.storyboard.version,originalFinalApprovedVersion:target.result.finalApprovedVersion,proposalState:target.factReview.state,verdict:target.factReview.proposal.semanticReview.verdict,newImages:0,originalApplied:false};await writeFile(resolve(root,'최종보존검증.json'),JSON.stringify(result,null,2));console.log(JSON.stringify(result));if(!result.contentUnchanged||!sameAssets||active||quickCheck!=='ok')process.exitCode=1;
+}finally{db.close();}

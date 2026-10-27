@@ -1,0 +1,11 @@
+import {spawn} from 'node:child_process';
+import {writeFile,mkdir} from 'node:fs/promises';
+import {resolve} from 'node:path';
+import {initializeOwnedScope,ownedDescendantsExited,closeOwnedScope} from '../dist/server/providers/프로세스격리.js';
+import {trackOwnedChild,childrenReport} from '../dist/server/providers/정리증거.js';
+const out=resolve('실행데이터/실사용검수복구/종료실측');await mkdir(out,{recursive:true});
+await initializeOwnedScope();
+const child=spawn(process.execPath,['-e','setTimeout(()=>{process.stdout.write("RESULT_READY\\n");setTimeout(()=>process.exit(0),20);},2500);'],{cwd:process.cwd(),shell:false,windowsHide:true,stdio:['ignore','pipe','pipe']});
+const tracked=trackOwnedChild(child);await new Promise((ok,no)=>{child.stdout.once('data',ok);child.once('error',no);});
+const evidence=await tracked.cleanup();await new Promise(r=>setTimeout(r,150));const jobEmpty=await ownedDescendantsExited();
+const result={actual_os_test:true,realModelCalls:0,evidence,report:childrenReport('harmless-exit-race',[evidence]),jobEmpty};await writeFile(resolve(out,'자연종료경합_'+(process.argv[2]??'확인')+'.json'),JSON.stringify(result,null,2));console.log(JSON.stringify(result));if(jobEmpty)await closeOwnedScope();else throw Error('OWNED_TEST_JOB_NOT_EMPTY');

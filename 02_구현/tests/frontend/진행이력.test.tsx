@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import '@testing-library/jest-dom/vitest';
 import {it,expect,vi,afterEach} from 'vitest';
-import {render,screen,cleanup,within,act} from '@testing-library/react';
+import {render,screen,cleanup,within,act,fireEvent} from '@testing-library/react';
 import {진행상태} from '../../src/frontend/컴포넌트/진행상태.js';
 import {createMockSnapshot} from '../../src/shared/모의자료.js';
 import type {EngineEvent} from '../../src/shared/포트.js';
@@ -17,7 +17,7 @@ it('실패 뒤 접수는 현재 작업에서 제거하고 종료 오류까지 �
  const common={projectId:p.projectId,runId:p.lastRun.runId,attempt:1,at:p.lastRun.createdAt};
  const events:EngineEvent[]=[{...common,seq:1,type:'progress',phase:'production',message:'요청 접수',completed:0,total:7},{...common,seq:2,type:'error',error:{code:'IMAGE_FAILED',message:'이미지 실패',retryable:false,nextActions:[],projectId:p.projectId,runId:p.lastRun.runId,currentVersion:null,details:{}}}];
  render(<진행상태 p={p} busy={false} send={vi.fn()} events={events} lastSyncedAt="2026-10-23T01:00:00Z"/>);
- const history=screen.getByRole('list',{name:'시간순 작업 이력'});expect(within(history).getAllByRole('listitem')).toHaveLength(2);
+ fireEvent.click(screen.getByText('시간순 작업 이력 · 2건'));const history=screen.getByRole('list',{name:'시간순 작업 이력'});expect(within(history).getAllByRole('listitem')).toHaveLength(2);
  expect(screen.getByText('최근 실제 활동')).toBeVisible();expect(screen.getByText('최근 서버 조회')).toBeVisible();
  expect(screen.queryByRole('status',{name:'현재 작업'})).not.toHaveTextContent('요청 접수');
  expect(within(history).getByText(/IMAGE_FAILED/)).toBeVisible();

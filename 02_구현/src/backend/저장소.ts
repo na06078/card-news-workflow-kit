@@ -20,6 +20,14 @@ import * as C from '../shared/포트.js';
 import {deleteProjectFiles,verifyProjectFilesAbsent,validateProjectDeletionPath} from './프로젝트삭제.js';
 import {DeleteProjectRequestSchema,ModelSelectionRequestSchema} from '../shared/작업공간계약.js';
 import {DomainError,requireThat as must} from './도메인.js';
+import {checkedWrite,checkpointMatches,checkpointSummary} from './부분복구.js';
+import {prepareFactCheckpoint} from '../providers/사실재검증.js';
+import {factFingerprint,beginFactReview,saveFactProposal,applyFactProposal,factIssues} from './사실복구.js';
+import {checkStoredFacts} from '../worker/검수.js';
+import {buildSemanticReviewInput,semanticInputHash} from '../providers/검수내용.js';
+import {persistedRevisionReady,freshEditorialAllowed} from './재시도정책.js';
+import {readWorkerState} from './실행상태.js';
+import {recoveryActions} from './복구행동.js';
 import {verifyAsset,safeFilename} from './파일경계.js';
 type Row={payload:string};
 export const createStore:C.CreateStore=async options=>{
@@ -27,26 +35,91 @@ export const createStore:C.CreateStore=async options=>{
  const db=new Database(options.dbPath);db.pragma('foreign_keys = ON');db.pragma('journal_mode = WAL');db.pragma(`busy_timeout = ${options.busyTimeoutMs??1500}`);
  const clock=options.clock??(()=>new Date().toISOString()),id=options.idFactory??randomUUID;
  let appRoot=dirname(fileURLToPath(import.meta.url));while(!existsSync(resolve(appRoot,'package.json'))){const parent=dirname(appRoot);must(parent!==appRoot,'STAGE_CONFLICT');appRoot=parent;}
+ const recoverySql=await readFile(resolve(appRoot,'migrations/004_부분복구.sql'),'utf8');
  const sql=await readFile(resolve(appRoot,'migrations/001_초기.sql'),'utf8');
  const deletionSql=await readFile(resolve(appRoot,'migrations/003_프로젝트삭제.sql'),'utf8');
  const modelSql=await readFile(resolve(appRoot,'migrations/002_모델설정.sql'),'utf8');
- try{db.transaction(()=>{db.exec(sql);db.prepare('INSERT OR IGNORE INTO schema_migrations VALUES(1,?)').run(clock());db.prepare('INSERT OR IGNORE INTO store_settings VALUES(1,?)').run(options.dataMode);must((db.prepare('SELECT data_mode FROM store_settings WHERE id=1').get() as {data_mode:string}).data_mode===options.dataMode,'STAGE_CONFLICT');const version=(db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get() as {v:number}).v;must(version===1||version===2||version===3,'STAGE_CONFLICT');if(version===1){db.exec(modelSql);db.prepare('INSERT INTO schema_migrations VALUES(2,?)').run(clock());}if(version<3){db.exec(deletionSql);db.prepare('INSERT INTO schema_migrations VALUES(3,?)').run(clock());}}).immediate();}catch(e){db.close();throw e;}
+ try{db.transaction(()=>{db.exec(sql);db.prepare('INSERT OR IGNORE INTO schema_migrations VALUES(1,?)').run(clock());db.prepare('INSERT OR IGNORE INTO store_settings VALUES(1,?)').run(options.dataMode);must((db.prepare('SELECT data_mode FROM store_settings WHERE id=1').get() as {data_mode:string}).data_mode===options.dataMode,'STAGE_CONFLICT');const version=(db.prepare('SELECT MAX(version) AS v FROM schema_migrations').get() as {v:number}).v;must(version===1||version===2||version===3||version===4,'STAGE_CONFLICT');if(version===1){db.exec(modelSql);db.prepare('INSERT INTO schema_migrations VALUES(2,?)').run(clock());}if(version<3){db.exec(deletionSql);db.prepare('INSERT INTO schema_migrations VALUES(3,?)').run(clock());}if(version<4){db.exec(recoverySql);db.prepare('INSERT INTO schema_migrations VALUES(4,?)').run(clock());}}).immediate();}catch(e){db.close();throw e;}
  const parse=<T>(row:Row|undefined):T=>{must(row,'NOT_FOUND');return JSON.parse(row.payload) as T;};
  const project=(pid:string)=>parse<C.ProjectSnapshot>(db.prepare('SELECT payload FROM projects WHERE id=?').get(pid) as Row|undefined);
  const deletion=(pid:string)=>db.prepare('SELECT request_id,version,state FROM project_deletions WHERE project_id=?').get(pid) as {request_id:string;version:number;state:string}|undefined;
  const writable=(pid:string)=>must(!deletion(pid),'PROJECT_DELETING',pid);
  const modelSettings=(pid:string)=>(db.prepare('SELECT model,version,updated_at FROM project_model_settings WHERE project_id=?').get(pid) as {model:string|null;version:number;updated_at:string}|undefined)??{model:null,version:0,updated_at:''};
  const run=(rid:string)=>parse<C.Run>(db.prepare('SELECT payload FROM runs WHERE id=?').get(rid) as Row|undefined);
+ // Derive retry affordances without mutating persisted runs/history.
+ const researchRetry=(r:C.Run,p:C.ProjectSnapshot)=>{
+  let current:C.Run|null=r,child:C.Run|null=null,rootFound=false,eligible=true,hasSession=false,unknown=false;
+  const seen=new Set<string>(),cwd=resolve(options.dataDir,'projects',p.projectId,'engine');
+  if(p.question?.status==='open')eligible=false;
+  for(let depth=0;current&&depth<1000;depth++){
+   const row=db.prepare('SELECT project_id,parent_id FROM runs WHERE id=?').get(current.runId) as {project_id:string;parent_id:string|null}|undefined;
+   if(!row||seen.has(current.runId)||row.project_id!==p.projectId||current.projectId!==p.projectId||current.kind!=='research'||current.phase!=='research'||!Number.isSafeInteger(current.attempt)||current.attempt<1||child&&child.attempt!==current.attempt+1)return {fresh:false,blocked:true,unknown:false};
+   seen.add(current.runId);unknown ||= current.externalOutcome==='unknown';
+   const sessions=db.prepare('SELECT project_id,cwd FROM sessions WHERE run_id=?').all(current.runId) as {project_id:string;cwd:string}[];
+   hasSession ||= sessions.length>0;
+   if(sessions.some(s=>s.project_id!==p.projectId||resolve(s.cwd)!==cwd))return {fresh:false,blocked:true,unknown:false};
+   const questions=(db.prepare('SELECT payload FROM questions WHERE project_id=?').all(p.projectId) as Row[]).some(q=>JSON.parse(q.payload).runId===current!.runId);
+   if(current.questionId!==null||questions)eligible=false;
+   if(!rootFound){
+    if(current.status==='failed'&&current.error?.code==='RESEARCH_FAILED'&&current.retryAllowed){rootFound=true;}
+    else if(!(current.status==='failed'&&current.error?.code==='SESSION_RECOVERY_UNVERIFIED'&&current.externalOutcome==='not_started'&&!(db.prepare('SELECT payload FROM invocations WHERE run_id=?').all(current.runId) as Row[]).some(j=>{const mark=JSON.parse(j.payload);return mark.phase!=='terminal_commit'||mark.state!=='committed';})))eligible=false;
+   }
+   child=current;
+   if(!row.parent_id){if(current.attempt!==1)return {fresh:false,blocked:true,unknown:false};current=null;break;}
+   const parent=db.prepare('SELECT payload FROM runs WHERE id=?').get(row.parent_id) as Row|undefined;
+   if(!parent)return {fresh:false,blocked:true,unknown:false};
+   try{const parsed=C.RunSchema.safeParse(JSON.parse(parent.payload));if(!parsed.success||parsed.data.runId!==row.parent_id)return {fresh:false,blocked:true,unknown:false};current=parsed.data;}catch{return {fresh:false,blocked:true,unknown:false};}
+  }
+  if(current)return {fresh:false,blocked:true,unknown:false};
+  const fresh=eligible&&rootFound;
+  return {fresh,blocked:hasSession&&!fresh,unknown:fresh&&unknown};
+ };
+ const retryPolicy=(r:C.Run,p:C.ProjectSnapshot)=>{
+  if(r.kind==='research')return researchRetry(r,p);
+  if(!['editorial','revision','factReview'].includes(r.kind))return {fresh:false,blocked:false,unknown:false};
+  const row=db.prepare('SELECT revision FROM runs WHERE id=?').get(r.runId) as {revision:string|null};const revision:C.RevisionRequest|null=row.revision?JSON.parse(row.revision):null;
+  const seen=new Set<string>();let current:C.Run|null=r,hasSession=false,hasQuestion=p.question?.status==='open';
+  for(let depth=0;current&&depth<1000;depth++){
+   if(seen.has(current.runId)||current.projectId!==p.projectId)return {fresh:false,blocked:true,unknown:false};seen.add(current.runId);
+   const sessions=db.prepare('SELECT project_id,cwd FROM sessions WHERE run_id=?').all(current.runId) as {project_id:string;cwd:string}[];hasSession ||= sessions.length>0;
+   if(sessions.some(s=>s.project_id!==p.projectId||resolve(s.cwd)!==resolve(options.dataDir,'projects',p.projectId,'engine')))return {fresh:false,blocked:true,unknown:false};
+   hasQuestion ||= current.questionId!==null||(db.prepare('SELECT payload FROM questions WHERE project_id=?').all(p.projectId) as Row[]).some(q=>JSON.parse(q.payload).runId===current!.runId);
+   const parent=(db.prepare('SELECT parent_id FROM runs WHERE id=?').get(current.runId) as {parent_id:string|null}|undefined)?.parent_id;
+   if(!parent){current=null;break;}const parentRow=db.prepare('SELECT payload FROM runs WHERE id=?').get(parent) as Row|undefined;if(!parentRow)return {fresh:false,blocked:true,unknown:false};current=JSON.parse(parentRow.payload);
+  }
+  if(current)return {fresh:false,blocked:true,unknown:false};
+  const fresh=freshEditorialAllowed(r,revision,hasQuestion),persisted=persistedRevisionReady(r,p,revision);
+  const needsProvider=r.kind!=='revision'||revision?.scope==='storyboard'||revision?.scope==='text'||revision?.scope==='layout';
+  return {fresh,blocked:hasSession&&needsProvider&&!fresh&&!persisted,unknown:false};
+ };
+ const publicRun=(r:C.Run,p=project(r.projectId)):C.Run=>{
+  const policy=retryPolicy(r,p);
+  return {...r,retryAllowed:policy.blocked?false:r.retryAllowed,retryRequiresUnknownConfirmation:policy.unknown};
+ };
+ const checkpoint=(pid:string,cid:string)=>parse<C.FactCheckpoint>(db.prepare('SELECT payload FROM fact_checkpoints WHERE project_id=? AND checkpoint_id=?').get(pid,cid) as Row|undefined);
+ const latestCheckpoint=(pid:string,rid:string)=>{const row=db.prepare('SELECT payload FROM fact_checkpoints WHERE project_id=? AND source_run_id=?').get(pid,rid) as Row|undefined;return row?JSON.parse(row.payload) as C.FactCheckpoint:undefined;};
+ const putCheckpoint=(p:C.ProjectSnapshot,r:C.Run,write:C.FactCheckpointWrite,snapshotVersion:number,sourceFileSha256:string|null=null)=>{
+  const checked=checkedWrite(write,p),old=latestCheckpoint(p.projectId,r.runId);
+  must(!old||old.step!=='semantic'||checked.step==='semantic','FACT_SCOPE_INVALID',p.projectId);
+  // Provenance can only name this producer run or an exact observation inherited from its saved parent.
+  const parentRow=db.prepare('SELECT checkpoint_id FROM fact_checkpoint_jobs WHERE run_id=?').get(r.runId) as {checkpoint_id:string}|undefined;
+  const inherited=parentRow?checkpoint(p.projectId,parentRow.checkpoint_id).repairObservation:undefined;
+  const observation=checked.repairObservation??old?.repairObservation??inherited;
+  if(observation)must(observation.originRunId===r.runId||[old?.repairObservation,inherited].some(value=>value&&C.canonicalJson(value)===C.canonicalJson(observation)),'FACT_SCOPE_INVALID',p.projectId);
+  if(observation)checked.repairObservation=structuredClone(observation);
+  const cp:C.FactCheckpoint={...checked,checkpointId:old?.checkpointId??id(),projectId:p.projectId,sourceRunId:r.runId,snapshotVersion,contentHash:factFingerprint(p,p.factReview!),savedAt:clock(),reviewer:structuredClone(p.factReview!.reviewer??C.DEFAULT_FACT_REVIEWER),requestedModel:r.requestedModel??null};
+  db.prepare('INSERT INTO fact_checkpoints VALUES(?,?,?,?,?) ON CONFLICT(source_run_id) DO UPDATE SET payload=excluded.payload').run(cp.checkpointId,p.projectId,r.runId,JSON.stringify(cp),sourceFileSha256);return cp;
+ };
  const saveRun=(r:C.Run)=>db.prepare('UPDATE runs SET status=?,payload=? WHERE id=?').run(r.status,JSON.stringify(r),r.runId);
- const get=(pid:string):C.ProjectSnapshot=>{const p=project(pid);const a=db.prepare("SELECT payload FROM runs WHERE project_id=? AND status IN ('queued','running','waiting_for_user','cancel_requested')").get(pid) as Row|undefined;p.activeRun=a?JSON.parse(a.payload):null;const last=db.prepare('SELECT payload FROM runs WHERE project_id=? ORDER BY rowid DESC LIMIT 1').get(pid) as Row|undefined;p.lastRun=last?JSON.parse(last.payload):null;p.allowedActions=p.question?.status==='open'&&!p.activeRun?['answer']:p.activeRun?['cancel',...(p.question?.status==='open'?['answer' as const]:[])]:p.status==='interrupted'||p.status==='error'||p.status==='canceled'?['retry']:p.stage==='selection'?['select']:p.stage==='storyboard'?['approve_storyboard','revise']:p.stage==='review'?['approve_final','revise']:p.stage==='export'?['revise']:[];const settings=modelSettings(pid);p.claudeModel=settings.model;p.modelSettingsVersion=settings.version;return C.ProjectSnapshotSchema.parse(p);};
- const save=(p:C.ProjectSnapshot)=>{db.prepare('INSERT INTO project_model_settings VALUES(?,NULL,0,?) ON CONFLICT(project_id) DO UPDATE SET updated_at=excluded.updated_at').run(p.projectId,clock());p.activeRun=null;p.lastRun=null;p.allowedActions=[];db.prepare('UPDATE projects SET payload=? WHERE id=?').run(JSON.stringify(p),p.projectId);db.prepare('INSERT OR REPLACE INTO history VALUES(?,?,?)').run(p.projectId,p.projectVersion,JSON.stringify(p));};
+ const get=(pid:string):C.ProjectSnapshot=>{const p=project(pid);const a=db.prepare("SELECT payload FROM runs WHERE project_id=? AND status IN ('queued','running','waiting_for_user','cancel_requested')").get(pid) as Row|undefined;p.activeRun=a?JSON.parse(a.payload):null;const last=db.prepare('SELECT payload FROM runs WHERE project_id=? ORDER BY rowid DESC LIMIT 1').get(pid) as Row|undefined;p.lastRun=last?publicRun(JSON.parse(last.payload),p):null;p.allowedActions=p.question?.status==='open'&&!p.activeRun?['answer']:p.activeRun?['cancel',...(p.question?.status==='open'&&p.activeRun.status!=='cancel_requested'?['answer' as const]:[])]:p.status==='interrupted'||p.status==='error'||p.status==='canceled'?(p.lastRun&&!p.lastRun.retryAllowed?[]:['retry']):p.stage==='selection'?['select']:p.stage==='storyboard'?['approve_storyboard','revise']:p.stage==='review'?['approve_final','revise']:p.stage==='export'?['revise']:[];const settings=modelSettings(pid);p.claudeModel=settings.model;p.modelSettingsVersion=settings.version;p.factIssues=factIssues(p);if(p.result&&p.result.finalApprovedVersion!==p.result.version)p.result.factsCheck=checkStoredFacts(p,p.result);p.execution={worker:readWorkerState(options.dataDir,clock()),queue:null};const blocker=db.prepare("SELECT project_id,status FROM runs WHERE project_id<>? AND status IN ('running','waiting_for_user','cancel_requested') AND (owner IS NOT NULL OR status='waiting_for_user') ORDER BY rowid LIMIT 1").get(pid) as {project_id:string;status:'running'|'waiting_for_user'|'cancel_requested'}|undefined;if(blocker)p.execution.queue={blockingProjectId:blocker.project_id,reason:blocker.status};const cp=p.factReview?latestCheckpoint(pid,p.factReview.runId):undefined;if(cp&&p.lastRun){p.factRecovery=checkpointSummary(cp,p,p.lastRun,clock(),settings.model);p.factIssues.push(...cp.issues);}else delete p.factRecovery;p.allowedActions=recoveryActions(p);if(p.result&&p.result.factsCheck!=='passed'&&!C.canManuallyApprove(p))p.allowedActions=p.allowedActions.filter(a=>a!=='approve_final');return C.ProjectSnapshotSchema.parse(p);};
+ const save=(p:C.ProjectSnapshot)=>{db.prepare('INSERT INTO project_model_settings VALUES(?,NULL,0,?) ON CONFLICT(project_id) DO UPDATE SET updated_at=excluded.updated_at').run(p.projectId,clock());p.activeRun=null;p.lastRun=null;p.allowedActions=[];delete p.factRecovery;db.prepare('UPDATE projects SET payload=? WHERE id=?').run(JSON.stringify(p),p.projectId);db.prepare('INSERT OR REPLACE INTO history VALUES(?,?,?)').run(p.projectId,p.projectVersion,JSON.stringify(p));};
  const receipt=(p:C.ProjectSnapshot,r:C.Run|null)=>({projectId:p.projectId,projectVersion:p.projectVersion,runId:r?.runId??null,status:r?.status??null,accepted:true as const});
  const enqueue=(p:C.ProjectSnapshot,kind:C.Run['kind'],revision:C.RevisionRequest|null=null,parent:C.Run|null=null)=>{const at=clock();const r:C.Run={runId:id(),projectId:p.projectId,kind,requestedModel:modelSettings(p.projectId).model,status:'queued',attempt:parent?parent.attempt+1:1,phase:parent?.phase??kind,createdAt:at,updatedAt:at,lastEventSeq:0,questionId:null,error:null,externalOutcome:'not_started',retryAllowed:false};db.prepare('INSERT INTO runs(id,project_id,status,payload,base_version,revision,parent_id) VALUES(?,?,?,?,?,?,?)').run(r.runId,p.projectId,r.status,JSON.stringify(r),p.projectVersion,revision?JSON.stringify(revision):null,parent?.runId??null);event(r,{type:'progress',phase:kind,message:'작업을 접수했습니다.',completed:null,total:null});return r;};
  const ledger=<T>(scope:string,rid:string,route:string,input:unknown,fn:()=>{status:number;body:C.Success<T>}):C.HttpReply<T>=>db.transaction(()=>{
   if(scope!=='@create'&&deletion(scope))return {status:409,body:{error:new DomainError('PROJECT_DELETING',scope).error},replayed:false};
   const canonical=C.canonicalJson(input),sha=createHash('sha256').update(canonical).digest('hex');const old=db.prepare('SELECT * FROM requests WHERE scope=? AND request_id=?').get(scope,rid) as {route:string;canonical:string;sha256:string;status:number;body:string}|undefined;
   if(old){if(old.route!==route||old.canonical!==canonical||old.sha256!==sha)return {status:409,body:{error:new DomainError('REQUEST_ID_CONFLICT',scope==='@create'?null:scope).error},replayed:false};return {status:old.status,body:JSON.parse(old.body),replayed:true};}
-  let out:{status:number;body:C.Success<T>|C.Failure};db.exec('SAVEPOINT domain_change');try{out=fn();db.exec('RELEASE domain_change');}catch(e){db.exec('ROLLBACK TO domain_change');db.exec('RELEASE domain_change');if(!(e instanceof DomainError))throw e;if(e.error.code==='VALIDATION_ERROR')return {status:e.status,body:{error:e.error},replayed:false};out={status:e.status,body:{error:e.error}};}
+  let out:{status:number;body:C.Success<T>|C.Failure};db.exec('SAVEPOINT domain_change');try{out=fn();db.exec('RELEASE domain_change');}catch(e){db.exec('ROLLBACK TO domain_change');db.exec('RELEASE domain_change');if(!(e instanceof DomainError))throw e;e.error.details={...e.error.details,requestOutcome:'rejected'};if(e.error.code==='VALIDATION_ERROR')return {status:e.status,body:{error:e.error},replayed:false};out={status:e.status,body:{error:e.error}};}
   db.prepare('INSERT INTO requests VALUES(?,?,?,?,?,?,?,?)').run(scope,rid,'POST',route,canonical,sha,out.status,JSON.stringify(out.body));return {...out,replayed:false};
  }).immediate();
  type LeaseRow={owner:string|null;lease_until:string|null;fence:number;base_version:number;revision:string|null};
@@ -59,8 +132,8 @@ export const createStore:C.CreateStore=async options=>{
   }
   must(valid,'VERSION_CONFLICT',f.projectId,p.projectVersion,'base version');return {r,p,row};};
  const advance=(f:C.LeaseFence,p:C.ProjectSnapshot)=>{p.projectVersion++;save(p);db.prepare('UPDATE runs SET base_version=? WHERE id=?').run(p.projectVersion,f.runId);return {...f,baseProjectVersion:p.projectVersion};};
- const event=(r:C.Run,draft:C.EventDraft)=>{const seq=(db.prepare('SELECT COALESCE(MAX(seq),0)+1 AS seq FROM events WHERE project_id=?').get(r.projectId) as {seq:number}).seq;const e=C.EngineEventSchema.parse({...draft,seq,at:clock(),projectId:r.projectId,runId:r.runId,attempt:r.attempt});db.prepare('INSERT INTO events VALUES(?,?,?,?)').run(r.projectId,seq,r.runId,JSON.stringify(e));r.lastEventSeq=seq;r.updatedAt=clock();if(e.type==='progress'){r.phase=e.phase;if(e.actualModel)r.actualModel=e.actualModel;}saveRun(r);return e;};
- const appQuestion=(kind:'period_expansion'|'output_size',runId:string|null,reason:string):C.Question=>({questionId:id(),version:1,runId,kind,status:'open',createdAt:clock(),items:[{itemId:kind,text:reason,header:kind==='output_size'?'출력 크기':'조사 기간',multiSelect:false,allowFreeText:true,recommendedOptionId:null,recommendationReason:null,options:(kind==='output_size'?[['1080x1080','정사각형'],['1080x1350','세로형']]:[['expand_30','30일로 확대'],['keep_current','현재 후보 유지']]).map(([optionId,label])=>({optionId:optionId!,label:label!,description:label!}))}]});
+ const event=(r:C.Run,draft:C.EventDraft)=>{const seq=(db.prepare('SELECT COALESCE(MAX(seq),0)+1 AS seq FROM events WHERE project_id=?').get(r.projectId) as {seq:number}).seq;const e=C.EngineEventSchema.parse({...draft,seq,at:clock(),projectId:r.projectId,runId:r.runId,attempt:r.attempt});db.prepare('INSERT INTO events VALUES(?,?,?,?)').run(r.projectId,seq,r.runId,JSON.stringify(e));r.lastEventSeq=seq;r.updatedAt=clock();if(e.type==='progress'){r.phase=e.phase;if(e.actualModel&&e.phase!=='semantic-review')r.actualModel=e.actualModel;}saveRun(r);return e;};
+ const appQuestion=(kind:'period_expansion'|'output_size',runId:string|null,reason:string):C.Question=>({questionId:id(),version:1,runId,kind,status:'open',createdAt:clock(),items:[{itemId:kind,text:reason,header:kind==='output_size'?'출력 크기':'조사 기간',multiSelect:false,allowFreeText:false,recommendedOptionId:null,recommendationReason:null,options:(kind==='output_size'?[['1080x1080','정사각형'],['1080x1350','세로형']]:[['expand_30','30일로 확대'],['keep_current','현재 후보 유지']]).map(([optionId,label])=>({optionId:optionId!,label:label!,description:label!}))}]});
  const insertQuestion=(p:C.ProjectSnapshot,q:C.Question)=>{must(p.question?.status!=='open','STAGE_CONFLICT',p.projectId);p.question=q;db.prepare('INSERT INTO questions VALUES(?,?,?,?,?,NULL)').run(p.projectId,q.questionId,q.version,q.status,JSON.stringify(q));};
  const recordTerminal=(r:C.Run)=>{if(!['succeeded','failed','canceled'].includes(r.status))return;const mark:C.InvocationMark={phase:'terminal_commit',state:'committed',cardId:null,expectedPath:null,sha256:null,at:clock()};db.prepare('INSERT INTO invocations VALUES(?,?,?)').run(r.runId,r.attempt,JSON.stringify(mark));};
  const checkRevisionFields=(old:C.CardRevision,next:C.CardRevision,scope:C.RevisionRequest['scope'])=>{
@@ -69,6 +142,20 @@ export const createStore:C.CreateStore=async options=>{
   if(scope!=='layout')must(C.canonicalJson(old.layout??null)===C.canonicalJson(next.layout??null),'STAGE_CONFLICT');
  };
  const store:C.Store={
+  async saveFactCheckpoint(f,write){db.transaction(()=>{const {r,p}=check(f);must(r.kind==='factReview'&&p.factReview?.runId===r.runId&&p.factReview.state==='pending'&&p.factReview.contentHash===factFingerprint(p,p.factReview),'FACT_PROPOSAL_STALE',p.projectId);putCheckpoint(p,r,write,f.baseProjectVersion);}).immediate();},
+  async getFactCheckpoint(pid,cid){writable(pid);project(pid);return structuredClone(checkpoint(pid,cid));},
+  async importFactCheckpoint(pid,input){return db.transaction(()=>{
+   writable(pid);must(C.IdSchema.safeParse(input.sourceRunId).success&&C.Sha256Schema.safeParse(input.sourceFileSha256).success&&Number.isSafeInteger(input.snapshotVersion),'FACT_SCOPE_INVALID',pid);
+   const p=get(pid),r=run(input.sourceRunId);
+   must(r.projectId===pid&&r.kind==='factReview'&&r.status==='failed'&&p.lastRun?.runId===r.runId&&p.factReview?.runId===r.runId&&!p.activeRun&&p.question?.status!=='open','FACT_PROPOSAL_STALE',pid);
+   must(!['CANCEL_CLEANUP_FAILED','EXTERNAL_OUTCOME_UNKNOWN'].includes(r.error?.code??''),'FACT_PROPOSAL_STALE',pid);
+   const historical=parse<C.ProjectSnapshot>(db.prepare('SELECT payload FROM history WHERE project_id=? AND version=?').get(pid,input.snapshotVersion) as Row|undefined);
+   must(historical.factReview?.runId===r.runId&&historical.factReview.state==='pending'&&historical.factReview.contentHash===factFingerprint(p,p.factReview!)&&historical.factReview.contentHash===factFingerprint(historical,historical.factReview),'FACT_PROPOSAL_STALE',pid);
+   const old=latestCheckpoint(pid,r.runId);if(old){const provenance=db.prepare('SELECT source_file_sha256 FROM fact_checkpoints WHERE checkpoint_id=?').get(old.checkpointId) as {source_file_sha256:string|null};must(old.snapshotVersion===input.snapshotVersion&&(!provenance.source_file_sha256||provenance.source_file_sha256===input.sourceFileSha256),'FACT_SCOPE_INVALID',pid);must(C.canonicalJson(old.draft)===C.canonicalJson(input.draft)&&C.canonicalJson(old.receipts)===C.canonicalJson(input.receipts),'FACT_SCOPE_INVALID',pid);return checkpointSummary(old,p,r,clock(),modelSettings(pid).model);}
+   const cp=putCheckpoint(historical,r,prepareFactCheckpoint(input.draft,historical,input.receipts),input.snapshotVersion,input.sourceFileSha256);
+   // Trusted operator establishes completed collector output; never changes the old failed verdict/content.
+   r.externalOutcome='known';saveRun(r);return checkpointSummary(cp,{...p,lastRun:r},r,clock(),modelSettings(pid).model);
+  }).immediate();},
   async deleteProject(pid,input){
    const v=DeleteProjectRequestSchema.parse(input);
    try{
@@ -124,7 +211,7 @@ export const createStore:C.CreateStore=async options=>{
      if(r.status!=='cancel_requested'){r.status='cancel_requested';r.updatedAt=clock();saveRun(r);p.projectVersion++;save(p);db.prepare('UPDATE runs SET base_version=? WHERE id=?').run(p.projectVersion,r.runId);}return {status:202,body:{data:receipt(p,r)}};
     }
     if(name==='answers'){
-     const input=v as C.AnswerRequest,q=p.question;must(q&&q.status==='open'&&q.questionId===input.questionId&&q.version===input.version,'QUESTION_STALE',pid,q?.version??null);
+     const input=v as C.AnswerRequest,q=p.question;must(p.activeRun?.status!=='cancel_requested','QUESTION_STALE',pid,q?.version??null);must(q&&q.status==='open'&&q.questionId===input.questionId&&q.version===input.version,'QUESTION_STALE',pid,q?.version??null);
      try{C.validateAnswer(q,input);}catch{throw new DomainError('VALIDATION_ERROR',pid);}
      must(q.runId===p.activeRun?.runId||(q.runId===null&&q.kind==='output_size'),'QUESTION_STALE',pid,q.version);
      const before=p.projectVersion;let r=p.activeRun;q.status='answered';
@@ -135,14 +222,36 @@ export const createStore:C.CreateStore=async options=>{
      db.prepare('INSERT INTO answers VALUES(?,?,?,?,?,?,NULL)').run(pid,q.questionId,q.version,JSON.stringify(input.answer),before,p.projectVersion);if(q.kind==='period_expansion'&&r)db.prepare('UPDATE runs SET base_version=? WHERE id=?').run(p.projectVersion,r.runId);save(p);return {status:202,body:{data:{...receipt(p,r),questionId:q.questionId,questionVersion:q.version}}};
     }
     if(p.activeRun)throw new DomainError('RUN_ACTIVE',pid,p.projectVersion,undefined,p.activeRun.runId);
+    if(['research','selection','approve','revisions','retry','factReview','factApply','rebuildExports'].includes(name))must(readWorkerState(options.dataDir,clock()).state!=='unavailable','WORKER_UNAVAILABLE',pid,p.projectVersion);
     if(name==='retry'){
-     const input=v as C.RetryRequest,old=run(target.runId!);must(input.version===p.projectVersion,'VERSION_CONFLICT',pid,p.projectVersion);must(p.lastRun?.runId===old.runId&&['failed','interrupted','canceled'].includes(old.status)&&old.retryAllowed,'STAGE_CONFLICT',pid);must(old.externalOutcome!=='unknown'||input.confirmUnknownOutcome===true,'EXTERNAL_OUTCOME_UNKNOWN',pid);
+     const input=v as C.RetryRequest,old=run(target.runId!);must(input.version===p.projectVersion,'VERSION_CONFLICT',pid,p.projectVersion);must(p.lastRun?.runId===old.runId&&['failed','interrupted','canceled'].includes(old.status)&&old.retryAllowed,'STAGE_CONFLICT',pid);const policy=retryPolicy(old,p);must(!policy.blocked,'SESSION_RECOVERY_UNVERIFIED',pid,p.projectVersion,'SESSION_RECOVERY_UNSUPPORTED');must((old.externalOutcome!=='unknown'&&!policy?.unknown)||input.confirmUnknownOutcome===true,'EXTERNAL_OUTCOME_UNKNOWN',pid);
      if(p.question?.status==='open'){p.question.status='superseded';db.prepare('UPDATE questions SET status=?,payload=? WHERE project_id=? AND id=? AND version=?').run('superseded',JSON.stringify(p.question),pid,p.question.questionId,p.question.version);}
-     const row=db.prepare('SELECT revision FROM runs WHERE id=?').get(old.runId) as {revision:string|null};p.projectVersion++;p.status=old.kind==='export'?'approved':'working';const r=enqueue(p,old.kind,row.revision?JSON.parse(row.revision):null,old);save(p);return {status:202,body:{data:receipt(p,r)}};
+     const row=db.prepare('SELECT revision FROM runs WHERE id=?').get(old.runId) as {revision:string|null};const factTask=old.kind==='factReview'&&p.factReview?beginFactReview(p,{requestId:input.requestId,version:p.projectVersion,claimIndices:p.factReview.claimIndices,cardIds:p.factReview.cardIds},old.runId):null;p.projectVersion++;p.status=old.kind==='export'?'approved':'working';const r=enqueue(p,old.kind,row.revision?JSON.parse(row.revision):null,old);if(factTask){factTask.reviewer=structuredClone(p.factReview?.reviewer??C.DEFAULT_FACT_REVIEWER);factTask.runId=r.runId;p.factReview=factTask;}save(p);return {status:202,body:{data:receipt(p,r)}};
     }
     if(name==='selection'){
      const input=v as C.SelectionRequest;must(input.version===p.researchVersion,'VERSION_CONFLICT',pid,p.researchVersion);must(p.stage==='selection'&&p.status==='ready'&&p.question?.status!=='open','STAGE_CONFLICT',pid);must(input.candidateIds.every(cid=>p.candidates.some(c=>c.candidateId===cid)),'VALIDATION_ERROR',pid);
      p.selectedCandidateIds=input.candidateIds;p.projectVersion++;p.stage='editorial';p.status='working';const r=enqueue(p,'editorial');save(p);return {status:202,body:{data:{...receipt(p,r),selectedCandidateIds:p.selectedCandidateIds}}};
+    }
+    if(name==='factReview'){
+     const input=v as C.FactReviewRequest;must(input.version===p.projectVersion,'VERSION_CONFLICT',pid,p.projectVersion);
+     let cp:C.FactCheckpoint|undefined,parent:C.Run|null=null;
+     if(input.checkpointId){
+      cp=checkpoint(pid,input.checkpointId);parent=run(input.resumeFromRunId!);
+      must(cp.sourceRunId===input.resumeFromRunId&&parent.projectId===pid&&parent.kind==='factReview'&&p.factRecovery?.checkpointId===cp.checkpointId&&p.factRecovery.available,'FACT_PROPOSAL_STALE',pid);
+      const review=p.factReview!;must(C.canonicalJson(input.claimIndices)===C.canonicalJson(review.claimIndices)&&C.canonicalJson(input.cardIds)===C.canonicalJson(review.cardIds),'FACT_SCOPE_INVALID',pid);
+      // 재개는 저장된 선택이 정본입니다. 생략값을 새 요청 기본값으로 덮지 않습니다.
+      if(input.reviewer!==undefined)must(input.reviewer===cp.reviewer.provider,'FACT_SCOPE_INVALID',pid);
+      if(input.reviewEffort!==undefined)must(cp.reviewer.provider==='agy'&&cp.reviewer.model===`gemini-3.8-flash-${input.reviewEffort}`,'FACT_SCOPE_INVALID',pid);
+     }
+     const task=beginFactReview(p,input,id());if(cp)task.reviewer=structuredClone(cp.reviewer);p.projectVersion++;p.status='working';const r=enqueue(p,'factReview',null,parent);task.runId=r.runId;p.factReview=task;
+     if(cp)db.prepare('INSERT INTO fact_checkpoint_jobs VALUES(?,?)').run(r.runId,cp.checkpointId);
+     save(p);return {status:202,body:{data:receipt(p,r)}};
+    }
+    if(name==='factApply'){
+     const input=v as C.FactApplyRequest;const reviewRun=p.factReview?run(p.factReview.runId):null;must(reviewRun&&reviewRun.projectId===pid&&reviewRun.kind==='factReview'&&reviewRun.status==='succeeded','FACT_PROPOSAL_STALE',pid);applyFactProposal(p,input);const r=p.result?enqueue(p,'factApply'):null;save(p);return {status:r?202:200,body:{data:receipt(p,r)}};
+    }
+    if(name==='rebuildExports'){
+     const input=v as C.VersionRequest;must(input.version===p.projectVersion,'VERSION_CONFLICT',pid,p.projectVersion);must(p.result&&p.result.finalApprovedVersion===p.result.version,'FINAL_NOT_APPROVED',pid);must(p.stage==='export'&&p.result.cards.length>0&&p.result.cards.every(c=>c.state==='ready'),'STAGE_CONFLICT',pid);p.projectVersion++;p.status='approved';const r=enqueue(p,'export');save(p);return {status:202,body:{data:receipt(p,r)}};
     }
     if(name==='research'){
      const input=v as C.VersionRequest;must(input.version===p.projectVersion,'VERSION_CONFLICT',pid,p.projectVersion);must(['topic','selection'].includes(p.stage)&&!p.storyboard&&!p.result,'STAGE_CONFLICT',pid);
@@ -151,7 +260,13 @@ export const createStore:C.CreateStore=async options=>{
     if(name==='approve'){
      const input=v as C.ApproveRequest;p.projectVersion++;
      if(input.stage==='storyboard'){must(p.storyboard&&input.version===p.storyboard.version,'VERSION_CONFLICT',pid,p.storyboard?.version??null);must(p.stage==='storyboard'&&p.status==='ready'&&p.storyboard.size&&p.storyboard.cards.length,'STAGE_CONFLICT',pid);p.storyboard.approvedVersion=p.storyboard.version;p.stage='production';p.status='working';const r=enqueue(p,'production');save(p);return {status:202,body:{data:receipt(p,r)}};}
-     must(p.result&&input.version===p.result.version,'VERSION_CONFLICT',pid,p.result?.version??null);must(p.stage==='review'&&p.status==='ready'&&p.result.cards.length&&p.result.cards.every(c=>c.state==='ready')&&p.result.factsCheck==='passed'&&p.result.visualCheck==='passed','STAGE_CONFLICT',pid);
+     must(p.result&&input.version===p.result.version,'VERSION_CONFLICT',pid,p.result?.version??null);
+     if(input.acknowledgeWarnings===true){
+      must(C.canManuallyApprove(p),'STAGE_CONFLICT',pid);
+      // 조회용 파생 검사로 저장된 기계 판정을 덮어쓰지 않습니다.
+      p.result.factsCheck=project(pid).result!.factsCheck;
+      p.result.manualApproval={resultVersion:p.result.version,approvedAt:clock(),contentHash:semanticInputHash(buildSemanticReviewInput(p)),warningsAcknowledged:true};
+     }else must(p.stage==='review'&&p.status==='ready'&&p.result.cards.length&&p.result.cards.every(c=>c.state==='ready')&&checkStoredFacts(p,p.result)==='passed'&&p.result.visualCheck==='passed','STAGE_CONFLICT',pid);
      p.result.finalApprovedVersion=p.result.version;for(const c of p.result.cards)c.approvedRevision=c.revision;p.stage='export';p.status='approved';const r=enqueue(p,'export');save(p);return {status:202,body:{data:{...receipt(p,r),finalApprovedVersion:p.result.version}}};
     }
     if(name==='cardApprove'){
@@ -160,13 +275,19 @@ export const createStore:C.CreateStore=async options=>{
     if(name==='revisions'){
      const input=v as C.RevisionRequest;
      if(input.scope==='storyboard'){must(p.storyboard&&input.version===p.storyboard.version,'VERSION_CONFLICT',pid,p.storyboard?.version??null);must(p.stage==='storyboard'&&!p.result&&p.storyboard.cards.some(c=>input.cardIds.includes(c.cardId))&&input.cardIds.every(cid=>p.storyboard!.cards.some(c=>c.cardId===cid)),'STAGE_CONFLICT',pid);p.storyboard.approvedVersion=null;p.status='working';}
-     else{must(p.result&&input.version===p.result.version,'VERSION_CONFLICT',pid,p.result?.version??null);must(['review','export'].includes(p.stage)&&p.result.cards.every(c=>c.state==='ready'),'STAGE_CONFLICT',pid);must(input.cardIds.every(cid=>p.result!.cards.some(c=>c.cardId===cid)),'VALIDATION_ERROR',pid);p.result.version++;p.result.finalApprovedVersion=null;p.result.factsCheck='pending';p.result.visualCheck='pending';p.exports=[];for(const c of p.result.cards)if(input.cardIds.includes(c.cardId)){c.revision++;c.state='pending';c.approvedRevision=null;c.previewAssetId=null;if(input.scope==='image')c.imageAssetId=null;c.error=null;}p.stage='production';p.status='working';}
+     else{
+      must(p.result&&input.version===p.result.version,'VERSION_CONFLICT',pid,p.result?.version??null);
+      must((['review','export'].includes(p.stage)&&p.result.cards.every(c=>c.state==='ready'))||(p.stage==='production'&&p.status==='error'&&['text','layout'].includes(input.scope)&&input.cardIds.every(cid=>p.result!.cards.some(c=>c.cardId===cid&&c.state==='failed'))),'STAGE_CONFLICT',pid);
+      must(input.cardIds.every(cid=>p.result!.cards.some(c=>c.cardId===cid)),'VALIDATION_ERROR',pid);
+      if(input.renderOnly)must(input.cardIds.every(cid=>p.result!.cards.find(c=>c.cardId===cid)?.imageAssetId),'ASSET_INVALID',pid);
+      p.result.version++;p.result.finalApprovedVersion=null;delete p.result.manualApproval;p.result.factsCheck='pending';p.result.visualCheck='pending';p.exports=[];for(const c of p.result.cards)if(input.cardIds.includes(c.cardId)){c.revision++;c.state='pending';c.approvedRevision=null;c.previewAssetId=null;if(input.scope==='image')c.imageAssetId=null;c.error=null;}p.stage='production';p.status='working';
+     }
      p.projectVersion++;const r=enqueue(p,'revision',input);save(p);return {status:202,body:{data:receipt(p,r)}};
     }
     throw new DomainError('STAGE_CONFLICT',pid);
    }) as C.HttpReply<C.ResponseByMutation[typeof name]>;
   },
-  async getProject(pid){return get(pid);},async getRun(rid){return run(rid);},
+  async getProject(pid){return get(pid);},async getRun(rid){return publicRun(run(rid));},
   async getEvents(pid,after,limit=100){project(pid);must(Number.isSafeInteger(after)&&after>=0,'VALIDATION_ERROR');const rows=db.prepare('SELECT payload FROM events WHERE project_id=? AND seq>? ORDER BY seq LIMIT ?').all(pid,after,Math.min(100,limit)+1) as Row[];const events=rows.slice(0,Math.min(100,limit)).map(r=>JSON.parse(r.payload) as C.EngineEvent);return {events,nextSeq:events.at(-1)?.seq??after,hasMore:rows.length>events.length};},
   async getExports(pid){const p=get(pid);must(p.result&&p.result.finalApprovedVersion===p.result.version,'FINAL_NOT_APPROVED',pid);for(const e of p.exports)await store.getDownload(pid,e.exportId);const current=project(pid);must(current.result?.version===p.result.version&&current.result.finalApprovedVersion===p.result.version,'EXPORT_STALE',pid);return {resultVersion:p.result.version,entries:p.exports,exportRun:p.lastRun?.kind==='export'?p.lastRun:null};},
   async getAsset(pid,aid){project(pid);const a=parse<C.VerifiedAsset>(db.prepare('SELECT payload FROM assets WHERE project_id=? AND id=?').get(pid,aid) as Row|undefined);must(['image','preview'].includes(a.kind),'NOT_FOUND');const retained=(db.prepare('SELECT payload FROM history WHERE project_id=? UNION ALL SELECT payload FROM projects WHERE id=?').all(pid,pid) as Row[]).some(row=>(JSON.parse(row.payload) as C.ProjectSnapshot).result?.cards.some(c=>c.imageAssetId===aid||c.previewAssetId===aid));must(retained,'NOT_FOUND');return verifyAsset(resolve(options.dataDir,'projects',pid),a);},
@@ -182,10 +303,14 @@ export const createStore:C.CreateStore=async options=>{
    // Retain parent/session/history for audit; all other retries keep the recovery gate.
    const parent=row.parent_id?run(row.parent_id):null;
    const readOnlyPlanning=r.kind==='editorial'||r.kind==='revision'&&row.revision!==null&&JSON.parse(row.revision).scope==='storyboard';
-   const freshEditorialRetry=readOnlyPlanning&&parent?.projectId===r.projectId&&parent.kind===r.kind&&parent.status==='failed'&&['TOOL_PERMISSION_DENIED','PROVIDER_PROTOCOL_ERROR','RESEARCH_FAILED'].includes(parent.error?.code??'')&&parent.retryAllowed&&parent.questionId===null;
-   const savedSession=freshEditorialRetry?undefined:db.prepare('WITH RECURSIVE lineage(id,depth) AS (VALUES(?,0) UNION ALL SELECT r.parent_id,l.depth+1 FROM runs r JOIN lineage l ON r.id=l.id WHERE r.parent_id IS NOT NULL AND r.project_id=? AND l.depth<1000) SELECT s.session_id,s.cwd FROM lineage l JOIN sessions s ON s.run_id=l.id WHERE s.project_id=? ORDER BY l.depth LIMIT 1').get(r.runId,p.projectId,p.projectId) as {session_id:string;cwd:string}|undefined;
-   const context:C.EngineContext|null=['research','editorial','revision'].includes(r.kind)?{projectId:p.projectId,runId:r.runId,attempt:r.attempt,engine:'claude-agent-sdk',engineSessionId:savedSession?.session_id??null,cwd:savedSession?.cwd??resolve(options.dataDir,'projects',p.projectId,'engine'),phase:r.kind as C.EngineContext['phase'],baseProjectVersion:p.projectVersion,requestedModel:r.requestedModel??null}:null;
-   return {fence,leaseUntil,run:r,snapshot:get(p.projectId),context,revision:row.revision?JSON.parse(row.revision):null,attemptDir};
+   const freshEditorialRetry=readOnlyPlanning&&parent?.projectId===r.projectId&&parent.kind===r.kind&&retryPolicy(parent,p).fresh;
+   const freshResearchRetry=r.kind==='research'&&parent!==null&&researchRetry(parent,p).fresh;
+   const resumeRow=db.prepare('SELECT checkpoint_id FROM fact_checkpoint_jobs WHERE run_id=?').get(r.runId) as {checkpoint_id:string}|undefined;
+   const factCheckpoint=resumeRow?checkpoint(p.projectId,resumeRow.checkpoint_id):undefined;
+   if(factCheckpoint)must(checkpointMatches(factCheckpoint,p),'FACT_PROPOSAL_STALE',p.projectId);
+   const savedSession=factCheckpoint||freshEditorialRetry||freshResearchRetry?undefined:db.prepare('WITH RECURSIVE lineage(id,depth) AS (VALUES(?,0) UNION ALL SELECT r.parent_id,l.depth+1 FROM runs r JOIN lineage l ON r.id=l.id WHERE r.parent_id IS NOT NULL AND r.project_id=? AND l.depth<1000) SELECT s.session_id,s.cwd FROM lineage l JOIN sessions s ON s.run_id=l.id WHERE s.project_id=? ORDER BY l.depth LIMIT 1').get(r.runId,p.projectId,p.projectId) as {session_id:string;cwd:string}|undefined;
+   const context:C.EngineContext|null=['research','editorial','revision','factReview'].includes(r.kind)?{projectId:p.projectId,runId:r.runId,attempt:r.attempt,engine:'claude-agent-sdk',engineSessionId:savedSession?.session_id??null,cwd:savedSession?.cwd??resolve(options.dataDir,'projects',p.projectId,'engine'),phase:r.kind as C.EngineContext['phase'],baseProjectVersion:p.projectVersion,requestedModel:r.requestedModel??null}:null;
+   return {fence,leaseUntil,run:r,snapshot:get(p.projectId),context,...(factCheckpoint?{factCheckpoint}:{}),revision:row.revision?JSON.parse(row.revision):null,attemptDir};
   }).immediate();if(claimed){await mkdir(claimed.attemptDir,{recursive:true});if(claimed.context)await mkdir(claimed.context.cwd,{recursive:true});}return claimed;},async heartbeat(f,input){return db.transaction(()=>{try{check(f,true,true);}catch(e){if(e instanceof DomainError)return false;throw e;}db.prepare('UPDATE runs SET lease_until=? WHERE id=?').run(new Date(Date.parse(input.now)+input.leaseMs).toISOString(),f.runId);return true;}).immediate();},async isCancelRequested(f){try{return check(f,true,true).r.status==='cancel_requested';}catch{return true;}},async appendEvent(f,draft){return db.transaction(()=>{const {r}=check(f);return event(r,draft);}).immediate();},
   async saveQuestion(f,input,mapping){const q=C.QuestionSchema.parse(input);return db.transaction(()=>{const {r,p}=check(f);must(q.runId===r.runId&&q.status==='open'&&q.kind==='editorial'&&['editorial','revision'].includes(r.kind)&&p.question?.status!=='open','STAGE_CONFLICT',p.projectId);db.prepare('INSERT INTO questions VALUES(?,?,?,?,?,?)').run(p.projectId,q.questionId,q.version,q.status,JSON.stringify(q),mapping?JSON.stringify(mapping):null);p.question=q;p.status='waiting_for_user';r.status='waiting_for_user';r.questionId=q.questionId;saveRun(r);const fence=advance(f,p);return {fence,event:event(r,{type:'need_input',question:q})};}).immediate();},
   async readAnswer(f,qid,version){return db.transaction(()=>{const {r,p,row}=check(f,false,true);must(p.question?.questionId===qid&&p.question.version===version&&r.questionId===qid,'QUESTION_STALE',p.projectId);const a=db.prepare('SELECT * FROM answers WHERE project_id=? AND question_id=? AND version=?').get(p.projectId,qid,version) as {payload:string;base_before:number;base_after:number;delivered_attempt:number|null}|undefined;if(!a)return null;must((f.baseProjectVersion===a.base_before||f.baseProjectVersion===a.base_after)&&p.projectVersion===a.base_after&&(row.base_version===a.base_before||row.base_version===a.base_after),'VERSION_CONFLICT',p.projectId);if(a.delivered_attempt!==null)return null;db.prepare('UPDATE runs SET base_version=? WHERE id=?').run(a.base_after,r.runId);return {answer:JSON.parse(a.payload),fence:{...f,baseProjectVersion:a.base_after}};}).immediate();},
@@ -202,9 +327,12 @@ export const createStore:C.CreateStore=async options=>{
     const revision:C.RevisionRequest|null=row.revision?JSON.parse(row.revision):null;
     for(const a of assets)db.prepare('INSERT INTO assets VALUES(?,?,?,?)').run(a.assetId,a.projectId,a.absolutePath,JSON.stringify(a));
     let draft:C.EventDraft|null=null;
+    if(result.type==='production'&&r.kind==='factApply')must(p.factReview?.state==='applied'&&p.result&&result.result.cards.every(c=>p.result!.cards.some(old=>old.cardId===c.cardId&&old.imageAssetId===c.imageAssetId)),'ASSET_INVALID',p.projectId);
     if(result.type==='content'){
      const content=result.content;
-     if(content.kind==='candidates'){
+     if(content.kind==='factReview'){
+      must(r.kind==='factReview','FACT_SCOPE_INVALID',p.projectId);saveFactProposal(p,r.runId,content);p.status=p.result&&p.result.finalApprovedVersion===p.result.version?'approved':'ready';draft={type:'result',kind:'factReview',version:p.projectVersion+1};
+     }else if(content.kind==='candidates'){
       must(r.kind==='research'&&content.researchVersion===p.researchVersion+1,'STAGE_CONFLICT',p.projectId);p.researchVersion=content.researchVersion;p.candidates=content.candidates.map(c=>C.CandidateSchema.parse(c));p.sources=content.sources.map(s=>C.SourceSchema.parse(s));p.selectedCandidateIds=[];p.claims=[];p.stage='selection';p.status='ready';draft={type:'result',kind:'candidates',version:p.researchVersion};
      }else if(content.kind==='storyboard'){
       must(r.kind==='editorial'||(r.kind==='revision'&&revision?.scope==='storyboard'),'STAGE_CONFLICT',p.projectId);const board=C.StoryboardSchema.parse(content.storyboard);must(board.version===(p.storyboard?.version??0)+1&&board.approvedVersion===null,'VERSION_CONFLICT',p.projectId);if(revision){must(p.storyboard&&board.size===p.storyboard.size&&board.cards.length===p.storyboard.cards.length&&p.storyboard.cards.every(old=>{const next=board.cards.find(c=>c.cardId===old.cardId);return next&&(revision.cardIds.includes(old.cardId)||C.canonicalJson(old)===C.canonicalJson(next));}),'STAGE_CONFLICT',p.projectId);}
@@ -214,11 +342,11 @@ export const createStore:C.CreateStore=async options=>{
       p.storyboard=board;p.sources=[...sources.values()];p.claims=content.claims.map(c=>C.ClaimSchema.parse(c));p.stage='storyboard';p.status='ready';draft={type:'result',kind:'storyboard',version:board.version};
      }else{must(r.kind==='revision'&&revision?.scope!=='storyboard'&&p.result,'STAGE_CONFLICT',p.projectId);const cards=content.cards.map(c=>C.CardRevisionSchema.parse(c));must(cards.every(c=>revision!.cardIds.includes(c.cardId))&&cards.length===revision!.cardIds.length,'STAGE_CONFLICT',p.projectId);for(const c of cards){const old=p.result.cards.find(x=>x.cardId===c.cardId)!;must(old&&c.revision===old.revision&&c.approvedRevision===null&&(revision!.scope==='image'||c.imageAssetId===old.imageAssetId),'VERSION_CONFLICT',p.projectId);p.result.cards[p.result.cards.indexOf(old)]={...c};checkRevisionFields(old,c,revision!.scope);if(revision!.scope==='layout')must(c.layout&&C.canonicalJson(c.layout)!==C.canonicalJson(old.layout??{fontScale:'normal',textAlign:'left',placement:'bottom'}),'STAGE_CONFLICT',p.projectId,p.projectVersion,'LAYOUT_CHANGE_REQUIRED');must(c.state===old.state&&c.imageAssetId===old.imageAssetId&&c.previewAssetId===old.previewAssetId,'STAGE_CONFLICT');}p.result.factsCheck=content.factsCheck;p.result.visualCheck=content.visualCheck;p.status='working';}
     }else if(result.type==='production'){
-     must(r.kind==='production'||(r.kind==='revision'&&revision?.scope!=='storyboard'),'STAGE_CONFLICT',p.projectId);const next=C.ResultVersionSchema.parse(result.result);must(p.storyboard&&p.storyboard.approvedVersion===p.storyboard.version&&next.storyboardVersion===p.storyboard.version&&next.size===p.storyboard.size&&next.finalApprovedVersion===null,'STAGE_CONFLICT',p.projectId);
-     if(p.result){must(next.version===p.result.version&&next.cards.length===p.result.cards.length,'VERSION_CONFLICT',p.projectId);for(const old of p.result.cards){const c=next.cards.find(c=>c.cardId===old.cardId);must(c,'STAGE_CONFLICT');if(!(r.kind==='production'&&old.state!=='ready')&&!revision?.cardIds.includes(old.cardId))must(C.canonicalJson(old)===C.canonicalJson(c),'STAGE_CONFLICT',p.projectId);else {must(C.canonicalJson(c.layout??null)===C.canonicalJson(old.layout??null),'STAGE_CONFLICT',p.projectId);must(c.revision===old.revision&&c.approvedRevision===null&&(!revision||revision.scope==='image'||c.imageAssetId===old.imageAssetId),'STAGE_CONFLICT',p.projectId);if(revision)checkRevisionFields(old,c,revision.scope);else must(['cardId','order','role','title','body','sourceIds','imagePlan'].every(k=>C.canonicalJson(old[k as keyof C.CardRevision])===C.canonicalJson(c[k as keyof C.CardRevision])),'STAGE_CONFLICT',p.projectId);}}}
+     must(r.kind==='production'||r.kind==='factApply'||(r.kind==='revision'&&revision?.scope!=='storyboard'),'STAGE_CONFLICT',p.projectId);const next=C.ResultVersionSchema.parse(result.result);must(p.storyboard&&p.storyboard.approvedVersion===p.storyboard.version&&next.storyboardVersion===p.storyboard.version&&next.size===p.storyboard.size&&next.finalApprovedVersion===null,'STAGE_CONFLICT',p.projectId);
+     if(p.result){must(next.version===p.result.version&&next.cards.length===p.result.cards.length,'VERSION_CONFLICT',p.projectId);for(const old of p.result.cards){const c=next.cards.find(c=>c.cardId===old.cardId);must(c,'STAGE_CONFLICT');if(!(r.kind==='production'&&old.state!=='ready')&&!(r.kind==='factApply'&&p.factReview?.state==='applied'&&p.factReview.proposal?.cards.some(patch=>patch.cardId===old.cardId))&&!revision?.cardIds.includes(old.cardId))must(C.canonicalJson(old)===C.canonicalJson(c),'STAGE_CONFLICT',p.projectId);else {must(C.canonicalJson(c.layout??null)===C.canonicalJson(old.layout??null),'STAGE_CONFLICT',p.projectId);must(c.revision===old.revision&&c.approvedRevision===null&&(!revision||revision.scope==='image'||c.imageAssetId===old.imageAssetId),'STAGE_CONFLICT',p.projectId);if(revision)checkRevisionFields(old,c,revision.scope);else must(['cardId','order','role','title','body','sourceIds','imagePlan'].every(k=>C.canonicalJson(old[k as keyof C.CardRevision])===C.canonicalJson(c[k as keyof C.CardRevision])),'STAGE_CONFLICT',p.projectId);}}}
      else{must(next.version===1&&next.cards.length===p.storyboard.cards.length&&next.cards.every(c=>c.revision===1&&p.storyboard!.cards.some(plan=>plan.cardId===c.cardId&&C.canonicalJson(plan)===C.canonicalJson(Object.fromEntries(Object.entries(c).filter(([k])=>['cardId','order','role','title','body','sourceIds','imagePlan'].includes(k)))))),'STAGE_CONFLICT',p.projectId);}
      for(const c of next.cards){if(c.state==='ready')must(c.imageAssetId&&c.previewAssetId,'ASSET_INVALID',p.projectId);for(const [aid,kind]of [[c.imageAssetId,'image'],[c.previewAssetId,'preview']]){if(!aid)continue;const a=parse<C.VerifiedAsset>(db.prepare('SELECT payload FROM assets WHERE id=? AND project_id=?').get(aid,p.projectId) as Row|undefined);must(a.kind===kind,'ASSET_INVALID',p.projectId);if(kind==='preview')must(a.width===1080&&a.height===(next.size==='1080x1080'?1080:1350),'ASSET_INVALID',p.projectId);}}
-     p.result=next;p.stage=next.cards.every(c=>c.state==='ready')?'review':'production';p.status=p.stage==='review'?'ready':'working';draft={type:'result',kind:'cards',version:next.version};
+     next.factsCheck=checkStoredFacts(p,next);p.result=next;p.stage=next.cards.every(c=>c.state==='ready')?'review':'production';p.status=p.stage==='review'?'ready':'working';draft={type:'result',kind:'cards',version:next.version};
     }else if(result.type==='exports'){
      must(r.kind==='export'&&p.result&&p.result.version===result.resultVersion&&p.result.finalApprovedVersion===p.result.version,'EXPORT_STALE',p.projectId);const entries=result.entries.map(e=>C.ExportEntrySchema.parse(e));must(entries.length===p.result.cards.length+4&&new Set(entries.map(e=>e.exportId)).size===entries.length&&new Set(entries.map(e=>e.filename)).size===entries.length&&entries.filter(e=>e.kind==='zip').length===1&&entries.filter(e=>e.kind==='records'&&e.mimeType==='application/json').length===2&&entries.filter(e=>e.kind==='records'&&e.mimeType==='text/plain').length===1&&p.result.cards.every(c=>entries.filter(e=>e.kind==='png'&&e.cardId===c.cardId&&e.cardRevision===c.revision).length===1),'ASSET_INVALID');
      for(const e of entries){must(e.projectId===p.projectId&&e.resultVersion===p.result.version&&safeFilename(e.filename)&&e.downloadUrl===`/api/projects/${p.projectId}/exports/${e.exportId}/download`,'ASSET_INVALID');let a:C.VerifiedAsset|undefined;

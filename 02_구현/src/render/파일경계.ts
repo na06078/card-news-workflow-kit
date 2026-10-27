@@ -20,8 +20,8 @@ export const dataRoot=join(appRoot,'실행데이터');
 export const sha256=(bytes:Uint8Array)=>createHash('sha256').update(bytes).digest('hex');
 export class RenderFailure extends Error {
  readonly error:AppError;
- constructor(code:ErrorCode,reason:string,context:{projectId:string;runId:string;resultVersion?:number}){
-  super(reason);this.name='RenderFailure';this.error={code,message:reason,retryable:['RENDER_FAILED','EXPORT_FAILED'].includes(code),nextActions:code==='FINAL_NOT_APPROVED'?['approve_final']:['revise'],projectId:context.projectId,runId:context.runId,currentVersion:context.resultVersion??null,details:{reason}};
+ constructor(code:ErrorCode,reason:string,context:{projectId:string;runId:string;resultVersion?:number},reasonCode?:string){
+  super(reason);this.name='RenderFailure';this.error={code,message:reason,retryable:['RENDER_FAILED','EXPORT_FAILED'].includes(code),nextActions:code==='FINAL_NOT_APPROVED'?['approve_final']:['revise'],projectId:context.projectId,runId:context.runId,currentVersion:context.resultVersion??null,details:{reason:reasonCode??code}};
  }
 }
 function within(root:string,path:string){const r=relative(root,path);return r===''||(!r.startsWith('..')&&!isAbsolute(r));}

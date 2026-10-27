@@ -2,10 +2,10 @@ import type {z} from 'zod';
 import {ConnectionListSchema,ConnectionStateSchema,type ConnectionState,type ConnectionProvider} from '../shared/연결계약.js';
 import {BootstrapSchema,FailureSchema,successSchema} from '../shared/포트.js';
 import {clientError} from './클라이언트.js';
-export type ConnectionAction='login'|'check'|'cancel'|'code';
+export type ConnectionAction='login'|'check'|'cancel'|'code'|'logout';
 export interface ConnectionClient {
  list():Promise<{connections:ConnectionState[]}>;
- act(provider:ConnectionProvider,action:ConnectionAction,input:{requestId:string;operationId?:string;authorizationCode?:string}):Promise<ConnectionState>;
+ act(provider:ConnectionProvider,action:ConnectionAction,input:{requestId:string;operationId?:string;authorizationCode?:string;confirm?:true;expectedAccountId?:string}):Promise<ConnectionState>;
 }
 export function createConnectionClient(fetcher:typeof fetch=globalThis.fetch.bind(globalThis)):ConnectionClient {
  let csrf:string|null=null;let bootstrapping:Promise<void>|null=null;

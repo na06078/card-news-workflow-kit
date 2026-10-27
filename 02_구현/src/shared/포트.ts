@@ -23,12 +23,13 @@ export type RequestIdentity = {method:'POST';route:string;requestId:string;canon
 export type StoredReceipt = RequestIdentity & {projectId:string|null;status:number;body:unknown};
 export type LeaseFence = {projectId:string;runId:string;ownerId:string;attempt:number;fencingToken:number;baseProjectVersion:number};
 export type ClaimedJob = {fence:LeaseFence;leaseUntil:string;run:C.Run;snapshot:C.ProjectSnapshot;
-  context:C.EngineContext|null;revision:C.RevisionRequest|null;attemptDir:string};
+  context:C.EngineContext|null;revision:C.RevisionRequest|null;attemptDir:string;factCheckpoint?:C.FactCheckpoint};
 export type EventDraft = C.EngineEvent extends infer E ? E extends C.EngineEvent ? Omit<E,'seq'|'at'|'projectId'|'runId'|'attempt'> : never : never;
 export type EngineContent =
  | {kind:'candidates';researchVersion:number;candidates:C.Candidate[];sources:C.Source[];shortageReason:string|null}
  | {kind:'storyboard';storyboard:C.Storyboard;sources:C.Source[];claims:C.Claim[]}
- | {kind:'cards';cards:C.CardRevision[];factsCheck:C.ResultVersion['factsCheck'];visualCheck:C.ResultVersion['visualCheck']};
+ | {kind:'cards';cards:C.CardRevision[];factsCheck:C.ResultVersion['factsCheck'];visualCheck:C.ResultVersion['visualCheck']}
+ | C.FactProposalDraft & {observations:C.FactSourceObservation[];semanticReview?:C.SemanticReviewReport};
 export type ImageProvenance = {tool:'agy';toolVersion:string;generatedAt:string;prompt:string;illustrative:true;
   usageConditions:string;usageConditionsVerified:boolean;conversationId:string|null};
 export type VerifiedAsset = {assetId:string;projectId:string;runId:string;attempt:number;kind:'image'|'preview'|'export'|'license';
@@ -68,6 +69,10 @@ export interface Store {
   readAnswer(fence:LeaseFence,questionId:string,version:number):Promise<{answer:C.AnswerItem[];fence:LeaseFence}|null>;
   markAnswerDelivered(fence:LeaseFence,questionId:string,version:number):Promise<LeaseFence>;
   saveSession(fence:LeaseFence,sessionId:string,cwd:string):Promise<void>;
+  saveFactCheckpoint(fence:LeaseFence,write:C.FactCheckpointWrite):Promise<void>;
+  getFactCheckpoint(projectId:string,checkpointId:string):Promise<C.FactCheckpoint>;
+  /** 승인된 로컬 운영 이관용. 브라우저·모델에 원시 관측 주입 API로 노출하지 않습니다. */
+  importFactCheckpoint(projectId:string,input:C.FactCheckpointImport):Promise<C.FactRecoverySummary>;
   journal(fence:LeaseFence,mark:InvocationMark):Promise<void>;
   /** terminal은 같은 transaction에서 phase=terminal_commit/state=committed를 단일 기록.
    * 이 예약 phase를 journal로 선기록/사후 기록하지 않습니다. 실패시 결과·상태·event도 rollback. */
@@ -97,6 +102,7 @@ export interface ProviderBridge {
   publishResult(context:C.EngineContext,content:EngineContent):Promise<C.EngineEvent>;
   publishError(context:C.EngineContext,error:C.AppError):Promise<C.EngineEvent>;
   saveSession(context:C.EngineContext,sessionId:string):Promise<void>;
+  saveFactCheckpoint?(context:C.EngineContext,write:C.FactCheckpointWrite):Promise<void>;
   status(runId:string):Promise<C.Run>;
 }
 export type LivePermission = {inference:false;search:false;image:false} | {inference:true;search:true;image:true;approvalReference:string};
@@ -110,6 +116,16 @@ export type ClaudeOptions = {bridge:ProviderBridge;livePermission:LivePermission
 export interface ClaudeAdapter extends C.EngineAdapter {dispose():Promise<C.CleanupReport[]>}
 /** G1 src/providers/클로드.ts. 네트워크/자식 실행은 start 내부 승인 게이트 이후만. */
 export type CreateClaudeAdapter = (options:ClaudeOptions)=>ClaudeAdapter;
+export type SemanticReviewerOptions = {selection:C.ReviewSelection;livePermission:{inference:boolean;approvalReference?:string};clock?:Clock;signal?:AbortSignal;onProgress?:(event:{provider:C.ReviewProvider;status:'started'|'completed'|'failed';actualModel?:string;phase?:'connected'|'generating'|'result_received'})=>Promise<void>|void};
+export interface SemanticReviewer {review(context:C.ReviewContext,input:C.SemanticReviewInput):Promise<C.SemanticReviewReport>;cancel(runId:string):Promise<C.CleanupReport>;dispose():Promise<C.CleanupReport[]>}
+export type CreateSemanticReviewer = (options:SemanticReviewerOptions)=>SemanticReviewer;
+export type FactLinkRepairerOptions = {requestedModel:string|null;livePermission:SemanticReviewerOptions['livePermission'];clock?:Clock;signal?:AbortSignal;onProgress?:SemanticReviewerOptions['onProgress']};
+export interface FactLinkRepairer {
+  repair(context:C.ReviewContext,input:C.FactLinkRepairInput):Promise<{decision:C.FactLinkRepairDecision;actualModel:string|null}>;
+  cancel(runId:string):Promise<C.CleanupReport>;
+  dispose():Promise<C.CleanupReport[]>;
+}
+export type CreateFactLinkRepairer = (options:FactLinkRepairerOptions)=>FactLinkRepairer;
 export type AgyInput = {projectId:string;runId:string;attempt:number;card:C.CardRevision;size:C.Size;
   attemptDir:string;prompt:string;expectedFilename:'image.png'};
 export type AgyOutput = {asset:VerifiedAsset;provenance:ImageProvenance};
@@ -130,6 +146,8 @@ export type ExportOutput = {projectId:string;resultVersion:number;entries:C.Expo
 export type BuildExport = (input:DeepReadonly<ExportInput>,options?:{signal?:AbortSignal})=>Promise<ExportOutput>;
 export type WorkerOptions = {store:Store;dataDir:string;ownerId:string;dataMode:DataMode;
   createClaudeAdapter:CreateClaudeAdapter;claudeOptions:Omit<ClaudeOptions,'bridge'|'signal'>;
+  createSemanticReviewer?:CreateSemanticReviewer;reviewerOptions?:Omit<SemanticReviewerOptions,'selection'|'signal'|'onProgress'>;
+  createFactLinkRepairer?:CreateFactLinkRepairer;factLinkRepairerOptions?:Omit<FactLinkRepairerOptions,'requestedModel'|'signal'|'onProgress'>;
   agy:AgyAdapter;renderCard:RenderCard;buildExport:BuildExport;
   font:{family:'Noto Sans KR';absolutePath:string;licenseAssetId:string};fontLicensePath:string;
   clock?:Clock;leaseMs?:number;heartbeatMs?:number;pollMs?:number};
@@ -149,6 +167,7 @@ export interface FrontendClient {
   getRun(runId:string):Promise<C.Run>;
   getEvents(projectId:string,after:number):Promise<C.EventPage>;
   getExports(projectId:string):Promise<C.ExportList>;
+  downloadExport?(projectId:string,exportId:string):Promise<Blob>;
 }
 export type AppProps = {client?:FrontendClient;initialProjectId?:string;dataMode?:DataMode};
 /** F1 src/frontend/App.tsx: named App (default 추가 가능). 미주입 시 실제 HTTP만, mock 자동대체 금지. */

@@ -29,9 +29,9 @@ it.each(['question','storyboard','review'] as const)('전환 시 %s의 자유 �
  client.getProject=vi.fn(async id=>structuredClone(id===b.projectId?second:first));render(<App client={client} workspaceClient={workspace} initialProjectId={a.projectId}/>);await screen.findByRole('heading',{name:a.topic});
  const label=stage==='question'?'독자 자유 답변':stage==='storyboard'?'선택한 카드의 계획 변경 요청':'카드 1 제목';
  if(stage==='question')await user.click(screen.getByRole('radio',{name:'직접 입력'}));
- const input=screen.getByLabelText(label);await user.clear(input);await user.type(input,'보존할 초안');
+ if(stage==='review')await user.click(screen.getByText('카드 1 원고 편집 · 저장된 원고'));const input=screen.getByLabelText(label);await user.clear(input);await user.type(input,'보존할 초안');
  await openProject(user,b.topic);await screen.findByRole('heading',{name:b.topic});
- await openProject(user,a.topic);await screen.findByRole('heading',{name:a.topic});expect(screen.getByLabelText(label)).toHaveValue('보존할 초안');
+ await openProject(user,a.topic);await screen.findByRole('heading',{name:a.topic});if(stage==='review')await user.click(screen.getByText('카드 1 원고 편집 · 미제출 변경 있음'));expect(screen.getByLabelText(label)).toBeVisible();expect(screen.getByLabelText(label)).toHaveValue('보존할 초안');
 });
 it('새 프로젝트 모델을 생성 요청에 전달한다',async()=>{const client=createMockClient();client.createProject=vi.fn(client.createProject);const ctl=createController(client);await ctl.create('새 주제',7,'sdk-exact-value');expect(client.createProject).toHaveBeenCalledWith(expect.objectContaining({claudeModel:'sdk-exact-value'}));});
 it('미확정 요청이 있으면 전환·초기화로 요청 ID를 잃지 않는다',async()=>{const {client}=setup();client.mutate=vi.fn(async()=>{throw {status:0,error:{message:'응답 유실',code:'NETWORK_ERROR'}};});const ctl=createController(client);await ctl.open(a.projectId);await ctl.send('selection',{candidateIds:[a.candidates[0]!.candidateId]});await ctl.open(b.projectId);ctl.reset();expect(ctl.getState().snapshot?.projectId).toBe(a.projectId);expect(ctl.getState().pendingRetry).toBe(true);});

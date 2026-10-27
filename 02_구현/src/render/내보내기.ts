@@ -36,7 +36,7 @@ export const buildExport:BuildExport=async(raw,options={})=>{
   const license=await localBytes(input.fontLicensePath,join(appRoot,'assets/render'),100000);
   if(!license.toString('utf8').includes('SIL OPEN FONT LICENSE'))throw new Error('글꼴 OFL 누락');
   const manifest=input.manifest.map(m=>({cardId:m.cardId,revision:m.revision,order:m.order,assetId:m.asset.assetId,sha256:m.asset.sha256}));
-  contents['출처기록.json']=strToU8(JSON.stringify({projectId:input.projectId,resultVersion:input.result.version,period:input.period,sources:input.sources,claims:input.claims,manifest,cards:input.result.cards.map(c=>({cardId:c.cardId,revision:c.revision,order:c.order,role:c.role,title:c.title,body:c.body,sourceIds:c.sourceIds}))},null,2));
+  contents['출처기록.json']=strToU8(JSON.stringify({projectId:input.projectId,resultVersion:input.result.version,period:input.period,sources:input.sources,claims:input.claims,review:{factsCheck:input.result.factsCheck,visualCheck:input.result.visualCheck,semanticReview:input.result.semanticReview??null,manualApproval:input.result.manualApproval??null},manifest,cards:input.result.cards.map(c=>({cardId:c.cardId,revision:c.revision,order:c.order,role:c.role,title:c.title,body:c.body,sourceIds:c.sourceIds}))},null,2));
   // 내부 절대경로는 배포 기록에 넣지 않고 원본 ID·크기·해시와 provenance를 보존.
   contents['이미지기록.json']=strToU8(JSON.stringify({projectId:input.projectId,resultVersion:input.result.version,imageRecords:input.imageRecords.map(r=>({cardId:r.cardId,cardRevision:r.cardRevision,image:{assetId:r.image.assetId,mimeType:r.image.mimeType,width:r.image.width,height:r.image.height,bytes:r.image.bytes,sha256:r.image.sha256},provenance:r.provenance}))},null,2));
   contents['글꼴라이선스.txt']=license;

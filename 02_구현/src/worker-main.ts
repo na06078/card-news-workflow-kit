@@ -7,6 +7,8 @@ import {createStore} from './backend/저장소.js';
 import {createWorker} from './worker/작업자.js';
 import {createClaudeAdapter} from './providers/클로드.js';
 import {createAgyAdapter} from './providers/agy.js';
+import {createClaudeFactLinkRepairer} from './providers/클로드검수.js';
+import {createSemanticReviewer} from './providers/의미검수.js';
 import {renderCard} from './render/렌더러.js';
 import {buildExport} from './render/내보내기.js';
 import {initializeOwnedScope,closeOwnedScope} from './providers/프로세스격리.js';
@@ -26,7 +28,7 @@ export function createProductionWorker(store:Store,dataDir:string){
  }};
  // command -v/디렉터리 메타데이터로 확인한 기존 Windows 설치 위치. 실행/버전/auth 확인 아님.
  const agy=createAgyAdapter({executablePath:resolve(homedir(),'AppData/Local/agy/bin/agy.EXE'),livePermission});
- const worker=createWorker({store:armedStore,dataDir,ownerId:randomUUID(),dataMode:'real',createClaudeAdapter,claudeOptions:{livePermission},agy,
+ const worker=createWorker({store:armedStore,dataDir,ownerId:randomUUID(),dataMode:'real',createClaudeAdapter,claudeOptions:{livePermission},createFactLinkRepairer:createClaudeFactLinkRepairer,factLinkRepairerOptions:{livePermission:{inference:true,approvalReference:'explicit partial factReview user action; stored orphan links only'}},createSemanticReviewer,reviewerOptions:{livePermission:{inference:true,approvalReference:'explicit factReview user action; provided-evidence review only'}},agy,
   renderCard:(i,o)=>renderCard(i,{...o,browserExecutablePath:resolve('.브라우저/chromium-1248/chrome-win64/chrome.exe')}),buildExport,
   font:{family:'Noto Sans KR',absolutePath:resolve('assets/render/NotoSansKR.woff2'),licenseAssetId:randomUUID()},fontLicensePath:resolve('assets/render/OFL.txt')});
  let closed=false;return {worker,async close(){if(closed)return;closed=true;await worker.dispose();const reports=await agy.dispose();if(reports.some(r=>r.status==='failed'||r.status==='unknown'))throw Error('AGY_CLEANUP_UNVERIFIED');}};

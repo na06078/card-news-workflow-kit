@@ -19,12 +19,14 @@ export const DeleteProjectResponseSchema=z.strictObject({projectId:IdSchema,dele
 export type DeleteProjectRequest=z.infer<typeof DeleteProjectRequestSchema>;
 export type DeleteProjectResponse=z.infer<typeof DeleteProjectResponseSchema>;
 
+export const MetadataErrorCodeSchema=z.enum(['AUTH_PATH_FORBIDDEN','AUTH_MODE_UNKNOWN','METADATA_CLEANUP_UNCONFIRMED','METADATA_UNAVAILABLE']);
+export type MetadataErrorCode=z.infer<typeof MetadataErrorCodeSchema>;
 export const ModelCatalogSchema=z.strictObject({
  status:z.enum(['unknown','ready','error']),checkedAt:UtcSchema.nullable(),
- models:z.array(z.strictObject({value:ModelIdSchema,displayName:text,description:z.string().max(4000)})),error:text.nullable()
+ models:z.array(z.strictObject({value:ModelIdSchema,displayName:text,description:z.string().max(4000)})),error:text.nullable(),errorCode:MetadataErrorCodeSchema.optional()
 });
 export const QuotaMetricSchema=z.strictObject({id:text,label:text,remainingPercent:z.number().min(0).max(100).nullable(),resetsAt:UtcSchema.nullable(),scope:z.enum(['account','model','image']),source:text});
-export const QuotaProviderSchema=z.strictObject({provider:z.enum(['claude','agy']),label:text,status:z.enum(['unknown','ready','error']),checkedAt:UtcSchema.nullable(),metrics:z.array(QuotaMetricSchema),message:text.nullable()});
+export const QuotaProviderSchema=z.strictObject({provider:z.enum(['claude','agy']),label:text,status:z.enum(['unknown','ready','error']),checkedAt:UtcSchema.nullable(),metrics:z.array(QuotaMetricSchema),message:text.nullable(),errorCode:MetadataErrorCodeSchema.optional()});
 export const ProviderDashboardSchema=z.strictObject({refreshing:z.boolean(),models:ModelCatalogSchema,providers:z.array(QuotaProviderSchema)});
 export const ProviderRefreshRequestSchema=z.strictObject({requestId:IdSchema});
 export type ModelCatalog=z.infer<typeof ModelCatalogSchema>;
@@ -36,6 +38,7 @@ export interface ProviderService {
  status():ProviderDashboard;
  refresh(requestId:string):ProviderDashboard;
  assertModel(model:string|null):void;
+ invalidate?():void;
  dispose():Promise<void>;
 }
 export interface WorkspaceClient {

@@ -37,6 +37,23 @@ export function createHttpClient(options:{baseUrl?:string;fetch?:typeof fetch}={
   return bootstrapRequest;
  }
  async function post<T>(path:string,schema:z.ZodType<T>,input:unknown){if(!csrf)await bootstrap();return request(path,schema,input);}
+ async function download(projectId:string,exportId:string):Promise<Blob>{
+  if(!csrf)await bootstrap();
+  let response:Response;
+  try{response=await fetcher(base+downloadUrl(projectId,exportId),{method:'GET',credentials:'include',cache:'no-store',headers:{Accept:'application/octet-stream, application/json'}});}
+  catch{throw clientError('NETWORK_ERROR','파일을 내려받는 연결에 실패했습니다. 현재 파일 상태를 확인한 뒤 다시 시도해 주세요.');}
+  if(!response.ok){
+   let body:unknown;try{body=await response.json();}catch{throw clientError('CLIENT_PROTOCOL_ERROR',`다운로드 오류 응답을 확인하지 못했습니다 (HTTP ${response.status}).`);}
+   const failure=FailureSchema.safeParse(body);
+   if(failure.success)throw {status:response.status,error:failure.data.error};
+   throw clientError('CLIENT_PROTOCOL_ERROR',`다운로드 오류 형식이 일치하지 않습니다 (HTTP ${response.status}).`);
+  }
+  const type=response.headers.get('Content-Type')?.split(';')[0]?.trim().toLowerCase();
+  if(!type||!['image/png','application/zip','application/json','text/plain','application/octet-stream'].includes(type))throw clientError('CLIENT_PROTOCOL_ERROR','서버가 다운로드 파일 대신 다른 응답을 반환했습니다. 파일 상태를 다시 확인해 주세요.');
+  let blob:Blob;try{blob=await response.blob();}catch{throw clientError('NETWORK_ERROR','파일 수신을 완료하지 못했습니다. 파일 상태를 다시 확인해 주세요.');}
+  if(blob.size===0)throw clientError('CLIENT_PROTOCOL_ERROR','비어 있는 파일은 저장하지 않습니다. 파일 상태를 다시 확인해 주세요.');
+  return blob;
+ }
  return {bootstrap,
   createProject:input=>post('/api/projects',CreateProjectResponseSchema,CreateProjectRequestSchema.parse(input)),
   getProject:id=>request(`/api/projects/${encodeURIComponent(id)}`,ProjectSnapshotSchema),
@@ -46,7 +63,8 @@ export function createHttpClient(options:{baseUrl?:string;fetch?:typeof fetch}={
   },
   getRun:id=>request(`/api/runs/${encodeURIComponent(id)}`,RunSchema),
   getEvents:(id,after)=>request(`/api/projects/${encodeURIComponent(id)}/events?after=${after}`,EventPageSchema),
-  getExports:id=>request(`/api/projects/${encodeURIComponent(id)}/exports`,ExportListSchema)
+  getExports:id=>request(`/api/projects/${encodeURIComponent(id)}/exports`,ExportListSchema),
+  downloadExport:download
  };
 }
 export function assetUrl(projectId:string,assetId:string){return `/api/projects/${encodeURIComponent(projectId)}/assets/${encodeURIComponent(assetId)}`;}

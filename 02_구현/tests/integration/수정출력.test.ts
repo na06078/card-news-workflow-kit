@@ -4,9 +4,22 @@ import {startLocal} from './fixtures/I2/호스트.js';
 import {prepareBoard} from './fixtures/I2/흐름.js';
 import {interruptPending} from './fixtures/I2/중단.js';
 
-test('lease 소실 질문/답변은 interrupted로 보존하고 pending 세션 자동 resume를 막는다',async()=>{
- const h=await startLocal();try{const {a,id,job,q,fence}=await interruptPending(h);let p=await a.client.getProject(id);expect(p.lastRun?.status).toBe('interrupted');expect(p.lastRun?.error?.code).toBe('SESSION_RECOVERY_UNVERIFIED');expect(p.question?.status).toBe('answered');const calls=h.calls.syntheticClaude;expect(await h.worker.tick()).toBe(false);expect(h.calls.syntheticClaude).toBe(calls);
- await expect(h.store.commit(fence,{type:'failure',error:p.lastRun!.error!,externalOutcome:'known',retryAllowed:true})).rejects.toBeTruthy();expect((await a.post(`/api/runs/${job.run.runId}/retry`,{version:p.projectVersion,requestId:randomUUID()})).status).toBe(409);await a.client.mutate('retry',{projectId:id,runId:job.run.runId},{version:p.projectVersion,confirmUnknownOutcome:true,requestId:randomUUID()});await h.worker.tick();p=await a.client.getProject(id);expect(p.lastRun?.error?.code).toBe('SESSION_RECOVERY_UNVERIFIED');expect(h.calls.syntheticClaude).toBe(calls);h.record('lost-worker',{projectId:id,questionId:q.question.questionId,answeredPreserved:true,automaticResume:false,staleCommitRejected:true,scope:'explicit future clock reconcile; not OS kill'});
+test('lease 소실 질문/답변은 보존하고 미지원 재시도는 접수 전에 거절한다',async()=>{
+ const h=await startLocal({dataRoot:'실행데이터/차단복구개선/복구접수회귀'});try{const {a,id,job,q,fence}=await interruptPending(h);let p=await a.client.getProject(id);expect(p.lastRun?.status).toBe('interrupted');expect(p.lastRun?.error?.code).toBe('SESSION_RECOVERY_UNVERIFIED');expect(p.question?.status).toBe('answered');const calls=h.calls.syntheticClaude;expect(await h.worker.tick()).toBe(false);expect(h.calls.syntheticClaude).toBe(calls);
+ await expect(h.store.commit(fence,{type:'failure',error:p.lastRun!.error!,externalOutcome:'known',retryAllowed:true})).rejects.toBeTruthy();
+ const version=p.projectVersion;
+ for(const confirmUnknownOutcome of [false,true]){
+  const rejected=await a.post(`/api/runs/${job.run.runId}/retry`,{version,confirmUnknownOutcome,requestId:randomUUID()});
+  expect(rejected.status).toBe(409);
+  expect(rejected.body.error.code).toBe('SESSION_RECOVERY_UNVERIFIED');
+  expect(rejected.body.error.nextActions).not.toContain('retry');
+ }
+ p=await a.client.getProject(id);
+ expect(p.lastRun?.runId).toBe(job.run.runId);expect(p.projectVersion).toBe(version);expect(p.activeRun).toBeNull();
+ expect(p.lastRun?.retryAllowed).toBe(false);expect(p.allowedActions).not.toContain('retry');
+ expect(p.lastRun?.error?.code).toBe('SESSION_RECOVERY_UNVERIFIED');expect(p.question?.status).toBe('answered');
+ expect(await h.worker.tick()).toBe(false);expect(h.calls.syntheticClaude).toBe(calls);
+ h.record('lost-worker',{projectId:id,questionId:q.question.questionId,answeredPreserved:true,retryRejectedBeforeEnqueue:true,automaticResume:false,staleCommitRejected:true,scope:'explicit future clock reconcile; not OS kill'});
  }finally{await h.close();}
 });
 

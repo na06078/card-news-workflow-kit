@@ -1,19 +1,33 @@
 import {z} from 'zod';
+import {createHash} from 'node:crypto';
 import {CandidateSchema,SourceSchema,ClaimSchema,StoryboardSchema,CardRevisionSchema, type EngineContent,type ProjectSnapshot,type EngineContext,type RevisionRequest,canonicalJson} from '../shared/포트.js';
 import {fail} from './오류.js';
+import {FactProposalDraftSchema} from '../shared/포트.js';
+import {validateFactReview,type FetchReceipt} from './사실재검증.js';
+const RESEARCH_SOURCE_LIMIT=100;
 export const contentSchema=z.discriminatedUnion('kind',[
- z.strictObject({kind:z.literal('candidates'),researchVersion:z.number().int().positive(),candidates:z.array(CandidateSchema).max(24),sources:z.array(SourceSchema).max(100),shortageReason:z.string().min(1).nullable()}),
+ z.strictObject({kind:z.literal('candidates'),researchVersion:z.number().int().positive(),candidates:z.array(CandidateSchema).max(24),sources:z.array(SourceSchema).max(RESEARCH_SOURCE_LIMIT),shortageReason:z.string().min(1).nullable()}),
  z.strictObject({kind:z.literal('storyboard'),storyboard:StoryboardSchema,sources:z.array(SourceSchema).max(100),claims:z.array(ClaimSchema).max(100)}),
  z.strictObject({kind:z.literal('cards'),cards:z.array(CardRevisionSchema).max(20),factsCheck:z.enum(['pending','passed','failed']),visualCheck:z.enum(['pending','passed','failed'])})
 ]);
+/** UUIDv5: a stable relationship ID, not a credential or a new factual source. */
+function sourceRelationId(sourceId:string,candidateId:string):string {
+ const namespace=Buffer.from(sourceId.replaceAll('-',''),'hex');
+ const bytes=createHash('sha1').update(namespace).update(candidateId,'utf8').digest().subarray(0,16);
+ bytes[6]=(bytes[6]!&0x0f)|0x50;bytes[8]=(bytes[8]!&0x3f)|0x80;
+ const hex=bytes.toString('hex');
+ return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
+}
 /** 번들 CLI의 JSON Schema 검증기는 draft-7을 사용하며 출력 루트는 현재 단계의 object로 한정합니다. */
 export function contentSchemaFor(phase:EngineContext['phase'],request?:Pick<RevisionRequest,'scope'>){
+ if(phase==='factReview')return FactProposalDraftSchema;
  if(phase==='research')return contentSchema.options[0];
  if(phase==='editorial'||request?.scope==='storyboard')return contentSchema.options[1];
  if(phase==='revision'&&request)return contentSchema.options[2];
  return fail('PROVIDER_PROTOCOL_ERROR');
 }
-export function validateContent(raw:unknown,snapshot:ProjectSnapshot,phase:EngineContext['phase'],request?:RevisionRequest):EngineContent {
+export function validateContent(raw:unknown,snapshot:ProjectSnapshot,phase:EngineContext['phase'],request?:RevisionRequest,receipts:FetchReceipt[]=[]):EngineContent {
+ if(phase==='factReview')return validateFactReview(raw,snapshot,receipts);
  const parsed=contentSchema.safeParse(raw);if(!parsed.success)return fail('PROVIDER_PROTOCOL_ERROR');
  const out=parsed.data;
  const unique=(a:string[])=>new Set(a).size===a.length;
@@ -23,8 +37,26 @@ export function validateContent(raw:unknown,snapshot:ProjectSnapshot,phase:Engin
   if(phase!=='research'||out.researchVersion!==snapshot.researchVersion+1)fail('PROVIDER_PROTOCOL_ERROR');
   if(!unique(out.candidates.map(c=>c.candidateId))||!unique(out.sources.map(s=>s.sourceId)))fail('RESEARCH_FAILED');
   const sourceMap=new Map(out.sources.map(s=>[s.sourceId,s]));
+  const inputSources=new Map(sourceMap);
   const candidateMap=new Map(out.candidates.map(c=>[c.candidateId,c]));
   for(const source of out.sources)if(!candidateMap.get(source.candidateId)?.sourceIds.includes(source.sourceId))fail('RESEARCH_FAILED');
+  // A document may support multiple stories. Preserve its original owner and
+  // facts while giving each additional candidate a consistent Source relation.
+  for(const candidate of out.candidates){
+   candidate.sourceIds=[...new Set(candidate.sourceIds.map(sourceId=>{
+    const source=inputSources.get(sourceId);if(!source)fail('RESEARCH_FAILED');
+    if(source.candidateId===candidate.candidateId)return sourceId;
+    const aliasId=sourceRelationId(sourceId,candidate.candidateId);
+    const alias={...source,sourceId:aliasId,candidateId:candidate.candidateId};
+    const existing=sourceMap.get(aliasId);
+    if(existing&&canonicalJson(existing)!==canonicalJson(alias))fail('RESEARCH_FAILED');
+    if(!existing){
+     if(out.sources.length>=RESEARCH_SOURCE_LIMIT)fail('RESEARCH_FAILED');
+     out.sources.push(alias);sourceMap.set(aliasId,alias);
+    }
+    return aliasId;
+   }))];
+  }
   const groups=new Map<string,typeof out.candidates[number]>();
   const keepSources:typeof out.sources=[];
   for(const c of out.candidates){

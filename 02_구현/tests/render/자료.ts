@@ -3,7 +3,7 @@ import {resolve} from 'node:path';
 import {createHash,randomUUID} from 'node:crypto';
 import {PNG} from 'pngjs';
 import type {RenderInput} from '../../src/shared/포트.js';
-export const data=resolve('실행데이터/R1');
+export const data=resolve(process.env.CARDNEWS_RENDER_TEST_DIR??'실행데이터/R1');
 export const hash=(b:Uint8Array)=>createHash('sha256').update(b).digest('hex');
 export async function fixture(name='TEST-정사각'):Promise<RenderInput>{
  await mkdir(data,{recursive:true});

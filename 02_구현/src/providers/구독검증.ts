@@ -1,5 +1,5 @@
 import type {AccountInfo} from '@anthropic-ai/claude-agent-sdk';
-import type {ClaudeOptions} from '../shared/포트.js';
+import type {ClaudeOptions,SemanticReviewerOptions} from '../shared/포트.js';
 import {fail} from './오류.js';
 export const SDK_VERSION='0.3.309';
 /** 동일 Query의 control 응답만 전달. optional source 부재는 오류도 OAuth enum도 아님.
@@ -15,4 +15,9 @@ export function inspectAccountMetadata(account:AccountInfo):void {
 export async function subscriptionPreflight(options:Pick<ClaudeOptions,'livePermission'|'usageCreditsDisabled'>):Promise<void> {
  const p=options.livePermission;
  if(!p.inference||!p.search||!p.image||!p.approvalReference)fail('AUTH_MODE_UNKNOWN');
+}
+/** 도구 없는 의미 검수만 허가합니다. 실제 구독 인증은 같은 Query에서 다시 확인합니다. */
+export async function reviewSubscriptionPreflight(options:Pick<SemanticReviewerOptions,'livePermission'>):Promise<void> {
+ const p=options.livePermission;
+ if(!p.inference||!p.approvalReference?.trim())fail('AUTH_MODE_UNKNOWN');
 }
