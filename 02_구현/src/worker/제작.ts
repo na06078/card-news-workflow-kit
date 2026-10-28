@@ -25,7 +25,8 @@ export async function produce(options:C.WorkerOptions,job:C.ClaimedJob,t:Executi
     const dir=resolve(job.attemptDir,card.cardId,String(card.revision));await mkdir(dir,{recursive:true});
     await t.mark('image','prepared',id,resolve(dir,'image.png'));await t.guard();await t.mark('image','started',id,resolve(dir,'image.png'));t.agyStarted();
     await progress({provider:'agy',operation:'image',status:'started',cardId:id},'카드 그림 요청');
-    const out=await t.wait(options.agy.generate({projectId:p.projectId,runId:job.run.runId,attempt:job.run.attempt,card,size:result.size,attemptDir:dir,prompt:card.imagePlan,expectedFilename:'image.png'},t.signal,async event=>{if(event.phase!=='image'&&event.phase!=='conversion')return;await progress({provider:event.phase==='image'?'agy':'app',operation:event.phase,status:event.status,cardId:id,...(event.phase==='image'?{tool:'generate_image'}:{})},event.message);}));
+    const prompt=job.run.revisionProtocol===2&&job.revision?.scope==='image'?`${card.imagePlan}\n사용자가 명시한 이미지 수정 지시:\n${job.revision.instruction}`:card.imagePlan;
+    const out=await t.wait(options.agy.generate({projectId:p.projectId,runId:job.run.runId,attempt:job.run.attempt,card,size:result.size,attemptDir:dir,prompt,expectedFilename:'image.png'},t.signal,async event=>{if(event.phase!=='image'&&event.phase!=='conversion')return;await progress({provider:event.phase==='image'?'agy':'app',operation:event.phase,status:event.status,cardId:id,...(event.phase==='image'?{tool:'generate_image'}:{})},event.message);}));
     await t.guard();await t.mark('image','output_observed',id,out.asset.absolutePath,out.asset.sha256);
     if(out.asset.projectId!==p.projectId||out.asset.runId!==job.run.runId||out.asset.attempt!==job.run.attempt||out.asset.kind!=='image')throw workerError('ASSET_INVALID',t.fence());
     image=out.asset;assets.push(image);card.imageAssetId=image.assetId;await t.mark('image','validated',id,image.absolutePath,image.sha256);

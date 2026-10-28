@@ -14,7 +14,7 @@ it('실제 조사 어댑터는 SDK가 수락하는 단일 루트 object 출력 �
   progress:async(_c,event)=>({...base(),...event}),
   openQuestion:async(_c,input)=>({...base(),type:'need_input',question:input.question}),
   waitForAnswer:async()=>[],
-  publishResult:async(_c,content)=>({...base(),type:'result',kind:content.kind,version:1}),
+  publishResult:async(_c,content)=>content.kind==='revision'?({...base(),type:'progress',phase:'revision',message:'수정 결정 준비',completed:null,total:null}):({...base(),type:'result',kind:content.kind,version:1}),
   publishError:async(_c,error)=>({...base(),type:'error',error}),
   saveSession:async()=>{},status:vi.fn(),
  };

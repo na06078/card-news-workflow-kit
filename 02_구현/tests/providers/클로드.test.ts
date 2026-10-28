@@ -7,7 +7,7 @@ const at='2026-10-23T00:00:00Z',session='11111111-1111-4111-8111-111111111111';
 const context:EngineContext={projectId:I.project,runId:I.run,attempt:1,engine:'claude-agent-sdk',engineSessionId:null,cwd:process.cwd(),phase:'research',baseProjectVersion:2};
 const permission={inference:false,search:false,image:false} as const;
 function bridge(){let seq=0;const event=(draft:EventDraft):EngineEvent=>({...draft,seq:++seq,projectId:I.project,runId:I.run,attempt:1,at});
- return {progress:vi.fn(async(_c,d)=>event(d)),openQuestion:vi.fn(async(_c,q)=>event({type:'need_input',question:q.question})),waitForAnswer:vi.fn(async():Promise<AnswerItem[]>=>[]),publishResult:vi.fn(async(_c,content:EngineContent)=>event({type:'result',kind:content.kind,version:1})),publishError:vi.fn(async(_c,e)=>event({type:'error',error:e})),saveSession:vi.fn(async()=>{}),status:vi.fn()} satisfies ProviderBridge;
+ return {progress:vi.fn(async(_c,d)=>event(d)),openQuestion:vi.fn(async(_c,q)=>event({type:'need_input',question:q.question})),waitForAnswer:vi.fn(async():Promise<AnswerItem[]>=>[]),publishResult:vi.fn(async(_c,content:EngineContent)=>event(content.kind==='revision'?{type:'progress',phase:'revision',message:'수정 결정 준비',completed:null,total:null}:{type:'result',kind:content.kind,version:1})),publishError:vi.fn(async(_c,e)=>event({type:'error',error:e})),saveSession:vi.fn(async()=>{}),status:vi.fn()} satisfies ProviderBridge;
 }
 const collect=async(it:AsyncIterable<EngineEvent>)=>{const out=[];for await(const e of it)out.push(e);return out;};
 function fakeQuery(events:unknown[],effect?:(options:Options)=>Promise<void>){let options:Options|undefined;const close=vi.fn();

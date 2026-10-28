@@ -8,11 +8,13 @@ import {verifiedPng,decodePng} from './이미지검사.js';
 import {verifyZip} from './압축검사.js';
 export const buildExport:BuildExport=async(raw,options={})=>{
  // 입력 객체를 공유하지 않는 불변 snapshot. 이후 현재 버전 재검사는 Store/서버 책임.
- const input=structuredClone(raw);const created:string[]=[];
+ let input=structuredClone(raw);const created:string[]=[];
  try{
   options.signal?.throwIfAborted();IdSchema.parse(input.projectId);IdSchema.parse(input.runId);VersionSchema.parse(input.attempt);
   if(input.result.finalApprovedVersion!==input.result.version)throw new RenderFailure('FINAL_NOT_APPROVED','현재 결과의 최종 승인이 필요합니다.',{...input,resultVersion:input.result.version});
   ResultVersionSchema.parse(input.result);
+  // 저장 배열은 정렬 계약이 없습니다. 복사본만 정렬하고 아래에서 ID·개정·자산 연결을 그대로 검증합니다.
+  input={...input,result:{...input.result,cards:[...input.result.cards].sort((a,b)=>a.order-b.order)},manifest:[...input.manifest].sort((a,b)=>a.order-b.order)};
   if(!input.result.cards.length||input.result.cards.length!==input.manifest.length||input.result.cards.length!==input.imageRecords.length)throw new RenderFailure('EXPORT_STALE','승인 manifest 수량이 일치하지 않습니다.',{...input,resultVersion:input.result.version});
   if(![7,30].includes(input.period.days)||input.period.to!==input.period.anchorAt||input.period.from>input.period.to)throw new Error('조사 기간 불일치');
   for(const t of [input.period.anchorAt,input.period.from,input.period.to])UtcSchema.parse(t);

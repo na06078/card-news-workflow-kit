@@ -59,7 +59,7 @@ test.each(['unresolvable','unknown-link','source-subset'])('typed 보완 %s 응�
   const obs=(cp as any).repairObservation;
   expect(obs).toMatchObject({decision,actualModel:'claude-test',originRunId:rid});expect(obs.observedAt>=before&&obs.observedAt<=new Date().toISOString()).toBe(true);
   const events=(await s.getEvents(target.projectId,0)).events;expect(events.some(e=>e.type==='progress'&&e.phase==='fact-link-repair'&&e.actualModel==='claude-test')).toBe(true);
-  expect(after.lastRun!.error!.message).toContain(mode==='unresolvable'?'연결을 확정하지 못했습니다':'연결 보완의 참조·출처 검증에 실패했습니다');
+  expect(after.lastRun!.error!.message).toContain(mode==='unresolvable'?'연결을 확정하지 못했습니다':mode==='unknown-link'?'연결 대상':'연결 보완의 참조·출처 검증에 실패했습니다');
   expect(JSON.stringify(after)).not.toContain('repairObservation');expect(JSON.stringify(after)).not.toContain(decision.reason);
   expect(semantic).not.toHaveBeenCalled();expect(o.agy.generate).not.toHaveBeenCalled();expect(o.renderCard).not.toHaveBeenCalled();expect(o.buildExport).not.toHaveBeenCalled();
   await w.dispose();await s.close();reopened=await createStore(state.options);
@@ -89,6 +89,11 @@ test.each(['unresolvable','unknown-link','cleanup-unknown'])('보완 %s는 성�
  const state=await prepared(false),{s,target,job,draft,receipts}=state;await s.saveFactCheckpoint(job.fence,prepareFactCheckpoint(draft,job.snapshot,receipts));await fail(s,job);
  const o=options({store:s,dataDir:state.options.dataDir,pid:target.projectId}),collector=vi.fn(()=>{throw Error('collector forbidden');}),semantic=vi.fn(()=>{throw Error('semantic forbidden');});o.createClaudeAdapter=collector;o.createSemanticReviewer=semantic;let rid='';
  o.createFactLinkRepairer=()=>({repair:async(c)=>{rid=c.runId;return {decision:mode==='unresolvable'?{status:'unresolvable',links:[],reason:'기존 주장을 연결할 수 없음'}:{status:'repaired',links:[{claimIndex:0,cardIds:[mode==='unknown-link'?randomUUID():draft.cards[1].cardId]}],reason:'후보 연결'},actualModel:'test'};},cancel:async id=>confirmed(id),dispose:async()=>[{...confirmed(rid),status:mode==='cleanup-unknown'?'unknown':'confirmed'}]});
- const w=createWorker(o);try{await w.tick();const p=await s.getProject(target.projectId);expect(p.factRecovery!.available).toBe(true);expect((await s.mutate('factReview',target,{requestId:randomUUID(),version:p.projectVersion,claimIndices:[0],cardIds:p.factReview!.cardIds,reviewer:'claude',resumeFromRunId:p.factRecovery!.sourceRunId,checkpointId:p.factRecovery!.checkpointId})).status).toBe(202);await w.tick();const after=await s.getProject(target.projectId);expect(after.lastRun!.error?.code).toBe(mode==='cleanup-unknown'?'CANCEL_CLEANUP_FAILED':'FACT_SCOPE_INVALID');expect(after.factReview!.proposal).toBeNull();expect(after.factRecovery!.step).toBe('links');expect(after.factRecovery!.available).toBe(mode!=='cleanup-unknown');expect(collector).not.toHaveBeenCalled();expect(semantic).not.toHaveBeenCalled();expect(o.agy.generate).not.toHaveBeenCalled();expect(o.renderCard).not.toHaveBeenCalled();}finally{await w.dispose();await s.close();}
+ const w=createWorker(o);try{
+  await w.tick();const p=await s.getProject(target.projectId);expect(p.factRecovery!.available).toBe(true);
+  expect((await s.mutate('factReview',target,{requestId:randomUUID(),version:p.projectVersion,claimIndices:[0],cardIds:p.factReview!.cardIds,reviewer:'claude',resumeFromRunId:p.factRecovery!.sourceRunId,checkpointId:p.factRecovery!.checkpointId})).status).toBe(202);
+  if(mode==='cleanup-unknown')await expect(w.tick()).rejects.toMatchObject({code:'CANCEL_CLEANUP_FAILED'});else await w.tick();
+  const after=await s.getProject(target.projectId);expect(after.lastRun!.error?.code).toBe(mode==='cleanup-unknown'?'CANCEL_CLEANUP_FAILED':'FACT_SCOPE_INVALID');expect(after.factReview!.proposal).toBeNull();expect(after.factRecovery!.step).toBe(mode==='cleanup-unknown'?'semantic':'links');expect(after.factRecovery!.available).toBe(false);expect(collector).not.toHaveBeenCalled();expect(semantic).not.toHaveBeenCalled();expect(o.agy.generate).not.toHaveBeenCalled();expect(o.renderCard).not.toHaveBeenCalled();
+ }finally{await w.dispose();await s.close();}
 });
 

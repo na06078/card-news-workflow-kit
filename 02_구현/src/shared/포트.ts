@@ -9,6 +9,7 @@ import type * as C from './계약.js';
 import type {ProjectList,ModelSelectionRequest,ModelSelectionResponse,DeleteProjectRequest,DeleteProjectResponse} from './작업공간계약.js';
 export * from './계약.js';
 export * from './검증.js';
+export {normalizeRevisionDecision,revisionPatchChanged,DEFAULT_CARD_LAYOUT,RevisionDecisionError} from './수정판정.js';
 export type DeepReadonly<T> = T extends (...args:never[])=>unknown ? T : T extends readonly (infer U)[] ? readonly DeepReadonly<U>[] : T extends object ? {readonly [K in keyof T]:DeepReadonly<T[K]>} : T;
 export type HttpReply<T> = {status:number;body:C.Success<T>|C.Failure;replayed:boolean};
 export type Clock = ()=>string; // UTC ISO; 테스트는 명시 고정 clock 주입
@@ -29,6 +30,7 @@ export type EngineContent =
  | {kind:'candidates';researchVersion:number;candidates:C.Candidate[];sources:C.Source[];shortageReason:string|null}
  | {kind:'storyboard';storyboard:C.Storyboard;sources:C.Source[];claims:C.Claim[]}
  | {kind:'cards';cards:C.CardRevision[];factsCheck:C.ResultVersion['factsCheck'];visualCheck:C.ResultVersion['visualCheck']}
+ | C.RevisionDecision
  | C.FactProposalDraft & {observations:C.FactSourceObservation[];semanticReview?:C.SemanticReviewReport};
 export type ImageProvenance = {tool:'agy';toolVersion:string;generatedAt:string;prompt:string;illustrative:true;
   usageConditions:string;usageConditionsVerified:boolean;conversationId:string|null};
@@ -37,6 +39,7 @@ export type VerifiedAsset = {assetId:string;projectId:string;runId:string;attemp
 export type InvocationMark = {phase:string;cardId:string|null;state:'prepared'|'started'|'output_observed'|'validated'|'committed';expectedPath:string|null;sha256:string|null;at:string};
 export type WorkerCommit =
  | {type:'content';content:EngineContent}
+ | {type:'revision';decision:C.RevisionDecision}
  | {type:'production';result:C.ResultVersion;assets:VerifiedAsset[]}
  | {type:'exports';resultVersion:number;entries:C.ExportEntry[];assets:VerifiedAsset[]}
  | {type:'failure';error:C.AppError;externalOutcome:C.Run['externalOutcome'];retryAllowed:boolean}
@@ -105,7 +108,7 @@ export interface ProviderBridge {
   saveFactCheckpoint?(context:C.EngineContext,write:C.FactCheckpointWrite):Promise<void>;
   status(runId:string):Promise<C.Run>;
 }
-export type LivePermission = {inference:false;search:false;image:false} | {inference:true;search:true;image:true;approvalReference:string};
+export type LivePermission = {inference:false;search:false;image:false} | {inference:true;search:true;image:true;approvalReference:string} | {inference:true;search:false;image:false;approvalReference:string};
 export type AuthAttestation = {mode:'subscription_oauth';sdkVersion:string;verifiedAt:string;settingsFingerprint:string;
   sameChildId:string;evidence:string[];usageCreditsDisabled:{confirmedAt:string;reference:string}};
 /** active auth attestation은 G1이 같은 자식에서 직접 검증해 내부 보유합니다.

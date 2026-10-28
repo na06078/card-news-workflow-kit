@@ -2,6 +2,7 @@ import {z} from 'zod';
 import {createHash} from 'node:crypto';
 import {CandidateSchema,SourceSchema,ClaimSchema,StoryboardSchema,CardRevisionSchema, type EngineContent,type ProjectSnapshot,type EngineContext,type RevisionRequest,canonicalJson} from '../shared/포트.js';
 import {fail} from './오류.js';
+import {RevisionPatchSchema,RevisionDecisionSchema,AppErrorSchema,normalizeRevisionDecision,DEFAULT_CARD_LAYOUT,type RevisionDecision} from '../shared/포트.js';
 import {FactProposalDraftSchema} from '../shared/포트.js';
 import {validateFactReview,type FetchReceipt} from './사실재검증.js';
 const RESEARCH_SOURCE_LIMIT=100;
@@ -19,15 +20,24 @@ function sourceRelationId(sourceId:string,candidateId:string):string {
  return `${hex.slice(0,8)}-${hex.slice(8,12)}-${hex.slice(12,16)}-${hex.slice(16,20)}-${hex.slice(20)}`;
 }
 /** 번들 CLI의 JSON Schema 검증기는 draft-7을 사용하며 출력 루트는 현재 단계의 object로 한정합니다. */
-export function contentSchemaFor(phase:EngineContext['phase'],request?:Pick<RevisionRequest,'scope'>){
+export function contentSchemaFor(phase:EngineContext['phase'],request?:Pick<RevisionRequest,'scope'> & Partial<Pick<RevisionRequest,'cardIds'>>,revisionProtocol?:2){
  if(phase==='factReview')return FactProposalDraftSchema;
  if(phase==='research')return contentSchema.options[0];
  if(phase==='editorial'||request?.scope==='storyboard')return contentSchema.options[1];
+ if(phase==='revision'&&request&&revisionProtocol===2){
+  const patch=RevisionPatchSchema.options.find(option=>option.shape.scope.value===request.scope);
+  if(!patch||!request.cardIds?.length)return fail('PROVIDER_PROTOCOL_ERROR');
+  const scoped=patch.extend({cardId:z.enum(request.cardIds as [string,...string[]])});
+  // Native StructuredOutput requires a single object root. The strict union is
+  // still checked here and by the shared normalizer; no app metadata is exposed.
+  return z.strictObject({kind:z.literal('revision'),status:z.enum(['patch','needs_scope','no_change','unsupported','clarification']),patches:z.array(scoped).length(request.cardIds.length).refine(xs=>new Set(xs.map(x=>x.cardId)).size===xs.length).optional(),requestedScope:z.enum(['text','image','layout']).optional(),reason:z.string().min(1).max(2000).optional(),question:z.string().min(1).max(2000).optional()}).refine(value=>RevisionDecisionSchema.safeParse(value).success,'정상 수정 결정의 필드만 허용');
+ }
  if(phase==='revision'&&request)return contentSchema.options[2];
  return fail('PROVIDER_PROTOCOL_ERROR');
 }
-export function validateContent(raw:unknown,snapshot:ProjectSnapshot,phase:EngineContext['phase'],request?:RevisionRequest,receipts:FetchReceipt[]=[]):EngineContent {
+export function validateContent(raw:unknown,snapshot:ProjectSnapshot,phase:EngineContext['phase'],request?:RevisionRequest,receipts:FetchReceipt[]=[],revisionProtocol?:2):EngineContent {
  if(phase==='factReview')return validateFactReview(raw,snapshot,receipts);
+ if(phase==='revision'&&request&&request.scope!=='storyboard'&&revisionProtocol===2)return normalizeRevisionDecision(raw,snapshot,request);
  const parsed=contentSchema.safeParse(raw);if(!parsed.success)return fail('PROVIDER_PROTOCOL_ERROR');
  const out=parsed.data;
  const unique=(a:string[])=>new Set(a).size===a.length;
@@ -117,3 +127,32 @@ export function validateContent(raw:unknown,snapshot:ProjectSnapshot,phase:Engin
  if(out.storyboard.version!==(snapshot.storyboard?.version??0)+1||snapshot.storyboard?.size&&out.storyboard.size!==snapshot.storyboard.size)fail('PROVIDER_PROTOCOL_ERROR');
  return {...out,sources:selectedSources};
 }
+
+/** 저장 응답의 명시적 unsupported만 재생합니다. 새 SDK 출력의 fallback이 아닙니다.
+ * 모델 error 설명/조치/승인값은 신뢰하거나 전파하지 않고 앱 소유 정상 결과로 바꿉니다. */
+export function normalizeStoredUnsupportedRevision(raw:unknown,snapshot:ProjectSnapshot,request:RevisionRequest):RevisionDecision{
+ const envelope=z.strictObject({kind:z.literal('cards'),cards:z.array(z.record(z.string(),z.unknown())).min(1).max(20),factsCheck:z.enum(['pending','passed','failed']),visualCheck:z.enum(['pending','passed','failed'])}).safeParse(raw);
+ const result=snapshot.result;
+ if(!envelope.success||!result||request.scope==='storyboard'||request.renderOnly||!request.cardIds.length||new Set(request.cardIds).size!==request.cardIds.length||request.cardIds.some(id=>!result.cards.some(c=>c.cardId===id)))return fail('PROVIDER_PROTOCOL_ERROR');
+ const output=envelope.data;
+ if(output.factsCheck!==result.factsCheck||output.visualCheck!==result.visualCheck||output.cards.length!==result.cards.length||new Set(output.cards.map(c=>c.cardId)).size!==result.cards.length)return fail('PROVIDER_PROTOCOL_ERROR');
+ let recognized=false;
+ for(const returned of output.cards){
+  const old=result.cards.find(c=>c.cardId===returned.cardId);if(!old)return fail('PROVIDER_PROTOCOL_ERROR');
+  const candidate=structuredClone(returned);
+  if(request.cardIds.includes(old.cardId)&&candidate.error&&typeof candidate.error==='object'){
+   const parsedError=AppErrorSchema.safeParse(candidate.error);if(!parsedError.success)return fail('PROVIDER_PROTOCOL_ERROR');
+   const error=parsedError.data;
+   if(error.code==='REVISION_SCOPE_UNSUPPORTED'||error.code==='PROVIDER_PROTOCOL_ERROR'&&error.details.reason==='REVISION_SCOPE_UNSUPPORTED'){
+    recognized=true;candidate.error=old.error;
+   }
+  }
+  const before={...old,layout:old.layout??DEFAULT_CARD_LAYOUT,sourceIds:[...old.sourceIds].sort()};
+  if(Array.isArray(candidate.sourceIds))candidate.sourceIds=[...candidate.sourceIds].sort();
+  if(candidate.layout===undefined)candidate.layout=DEFAULT_CARD_LAYOUT;
+  if(canonicalJson(candidate)!==canonicalJson(before))return fail('PROVIDER_PROTOCOL_ERROR');
+ }
+ if(!recognized)return fail('PROVIDER_PROTOCOL_ERROR');
+ return normalizeRevisionDecision({kind:'revision',status:'unsupported',reason:'저장된 응답은 요청 범위에서 지원하지 않는 수정이라고 명시했습니다. 기존 카드·PNG·승인은 변경하지 않았습니다.'},snapshot,request);
+}
+export {normalizeStoredUnsupportedRevision as normalizeLegacyRevisionResponse};

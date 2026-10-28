@@ -35,6 +35,19 @@ export type AnswerItem = {itemId:string;optionIds:string[];text:string|null};
 export type CardPlan = {cardId:string;order:number;role:'cover'|'body'|'closing';title:string;body:string;sourceIds:string[];imagePlan:string};
 export type Storyboard = {version:number;audience:string;rationale:string;format:string;hooks:string[];size:Size|null;cards:CardPlan[];approvedVersion:number|null};
 export type CardLayout = {fontScale:'small'|'normal'|'large';textAlign:'left'|'center';placement:'top'|'bottom'};
+export type CardRevisionScope = 'text'|'image'|'layout';
+export type RevisionPatch =
+ | {cardId:string;scope:'text';changes:{title:string;body:string;sourceIds:string[]}}
+ | {cardId:string;scope:'layout';changes:CardLayout}
+ | {cardId:string;scope:'image';changes:{imagePlan:string}};
+export type RevisionOutcome =
+ | {kind:'revision';status:'needs_scope';requestedScope:CardRevisionScope;reason:string}
+ | {kind:'revision';status:'no_change';reason:string}
+ | {kind:'revision';status:'unsupported';reason:string}
+ | {kind:'revision';status:'clarification';question:string};
+export type RevisionDecision = {kind:'revision';status:'patch';patches:RevisionPatch[]}|RevisionOutcome;
+export type RevisionApplied = {resultVersion:number;cardRevisions:{cardId:string;revision:number}[]};
+export type RevisionRequestInfo = {scope:CardRevisionScope;cardIds:string[];instruction:string;renderOnly?:true};
 export type CardRevision = CardPlan & {layout?:CardLayout;revision:number;imageAssetId:string|null;previewAssetId:string|null;state:'pending'|'generating'|'rendering'|'ready'|'failed';approvedRevision:number|null;error:AppError|null};
 export type ManualApproval = {resultVersion:number;approvedAt:string;contentHash:string;warningsAcknowledged:true};
 export type ResultVersion = {version:number;storyboardVersion:number;size:Size;cards:CardRevision[];factsCheck:'pending'|'passed'|'failed';visualCheck:'pending'|'passed'|'failed';finalApprovedVersion:number|null;semanticReview?:SemanticReviewReport;manualApproval?:ManualApproval};
@@ -66,7 +79,7 @@ export type FactReviewState = {
 };
 export type FactIssue = {code:string;message:string;claimIndex:number|null;cardIds:string[];sourceIds:string[]};
 /** 공개 요약에는 원문 처리 응답·관측 영수증·저장 경로를 포함하지 않습니다. */
-export type FactRecoverySummary = {checkpointId:string;sourceRunId:string;step:'links'|'semantic';available:boolean;reason:string|null;issues:FactIssue[];savedAt:string};
+export type FactRecoverySummary = {checkpointId:string;sourceRunId:string;step:'links'|'semantic';available:boolean;reason:string|null;issues:FactIssue[];savedAt:string;reuseRepairObservation?:boolean};
 export type FactFetchReceipt = Omit<FactSourceObservation,'sourceId'> & {result:string|null};
 export type FactRepairObservation = {decision:FactLinkRepairDecision;actualModel:string|null;observedAt:string;originRunId:string};
 export type FactCheckpointWrite = {step:'links'|'semantic';draft:FactProposalDraft;receipts:FactFetchReceipt[];issues:FactIssue[];repairObservation?:FactRepairObservation};
@@ -78,12 +91,12 @@ export type ExecutionState = {
  worker:{state:'unknown'|'ready'|'busy'|'unavailable';reason:string|null;checkedAt:string|null};
  queue:{blockingProjectId:string;reason:'running'|'waiting_for_user'|'cancel_requested'}|null;
 };
-export type Run = {runId:string;projectId:string;kind:'research'|'editorial'|'production'|'revision'|'export'|'factReview'|'factApply';status:RunStatus;attempt:number;phase:string;createdAt:string;updatedAt:string;lastEventSeq:number;questionId:string|null;error:AppError|null;externalOutcome:'not_started'|'known'|'unknown';retryAllowed:boolean;retryRequiresUnknownConfirmation?:boolean;requestedModel?:string|null;actualModel?:string};
+export type Run = {runId:string;projectId:string;kind:'research'|'editorial'|'production'|'revision'|'export'|'factReview'|'factApply';status:RunStatus;attempt:number;phase:string;createdAt:string;updatedAt:string;lastEventSeq:number;questionId:string|null;error:AppError|null;externalOutcome:'not_started'|'known'|'unknown';retryAllowed:boolean;retryRequiresUnknownConfirmation?:boolean;requestedModel?:string|null;actualModel?:string;revisionProtocol?:2;revisionOutcome?:RevisionOutcome;revisionApplied?:RevisionApplied;revisionRequest?:RevisionRequestInfo};
 export type ExportEntry = {exportId:string;projectId:string;resultVersion:number;kind:'png'|'zip'|'records';cardId:string|null;cardRevision:number|null;filename:string;mimeType:string;bytes:number;sha256:string;downloadUrl:string};
 export type ProjectSnapshot = {projectId:string;topic:string;projectVersion:number;stage:Stage;status:ProjectStatus;claudeModel?:string|null;modelSettingsVersion?:number;
   period:{days:7|30;anchorAt:string;from:string;to:string};researchVersion:number;candidates:Candidate[];sources:Source[];claims:Claim[];
   selectedCandidateIds:string[];question:Question|null;storyboard:Storyboard|null;result:ResultVersion|null;activeRun:Run|null;lastRun:Run|null;allowedActions:NextAction[];exports:ExportEntry[];dataMode:'real'|'mock';factReview?:FactReviewState;factRecovery?:FactRecoverySummary;factIssues?:FactIssue[];execution?:ExecutionState};
-export type EngineContext = {projectId:string;runId:string;attempt:number;engine:'claude-agent-sdk';engineSessionId:string|null;cwd:string;phase:'research'|'editorial'|'revision'|'factReview';baseProjectVersion:number;requestedModel?:string|null};
+export type EngineContext = {projectId:string;runId:string;attempt:number;engine:'claude-agent-sdk';engineSessionId:string|null;cwd:string;phase:'research'|'editorial'|'revision'|'factReview';baseProjectVersion:number;requestedModel?:string|null;revisionProtocol?:2};
 export type ProgressActivity = {provider:'claude'|'agy'|'app';operation:'authentication'|'search'|'fetch'|'planning'|'image'|'conversion'|'render'|'export';status:'started'|'completed'|'failed'|'waiting';cardId?:string;tool?:string};
 export type EngineEvent = {seq:number;projectId:string;runId:string;attempt:number;at:string} & (
   {type:'progress';phase:string;message:string;completed:number|null;total:number|null;activity?:ProgressActivity;actualModel?:string} |

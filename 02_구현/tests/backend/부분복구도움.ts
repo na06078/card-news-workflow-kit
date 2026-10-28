@@ -5,7 +5,7 @@ import {createStore} from '../../src/backend/저장소.js';
 import {createMockSnapshot} from '../../src/shared/모의자료.js';
 import {prepareFactCheckpoint,captureFetchReceipt} from '../../src/providers/사실재검증.js';
 import type * as C from '../../src/shared/포트.js';
-export async function prepared(health=true,reviewOptions:Pick<C.FactReviewRequest,'reviewer'|'reviewEffort'>={reviewer:'claude'}){const fixture=createMockSnapshot('selection');const state=await setup('1080x1080',[{text:'기존 수치',kind:'uncertain',sourceIds:[fixture.sources[0].sourceId],availability:'unknown',conditions:[]}],'실행데이터/부분복구/의미경계수정/backend');
+export async function prepared(health=true,reviewOptions:Pick<C.FactReviewRequest,'reviewer'|'reviewEffort'>={reviewer:'claude'}){const fixture=createMockSnapshot('selection');const state=await setup('1080x1080',[{text:'기존 수치',kind:'uncertain',sourceIds:[fixture.sources[0].sourceId],availability:'unknown',conditions:[]}],'실행데이터/연결쌍복구/서버/격리검사');
  if(health)createWorkerHealth(state.options.dataDir,randomUUID(),()=>new Date().toISOString()).update('ready');
  const {s,target,claim}=state,p=await s.getProject(target.projectId);
  await s.mutate('factReview',target,{requestId:randomUUID(),version:p.projectVersion,claimIndices:[0],cardIds:p.storyboard!.cards.map(c=>c.cardId),...reviewOptions});

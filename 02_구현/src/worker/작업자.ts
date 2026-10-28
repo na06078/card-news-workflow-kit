@@ -1,8 +1,9 @@
 import {mkdir} from 'node:fs/promises';
 import {resolve} from 'node:path';
 import {prepareFactCheckpoint,applyFactLinkRepair,validateFactReview} from '../providers/사실재검증.js';
-import {checkpointMatches} from '../backend/부분복구.js';
-import {DEFAULT_FACT_REVIEWER} from '../shared/포트.js';
+import {checkedWrite,checkpointMatches} from '../backend/부분복구.js';
+import {FactLinkFailure,linkDiagnostic} from '../providers/연결진단.js';
+import {DEFAULT_FACT_REVIEWER,canonicalJson,normalizeRevisionDecision,DEFAULT_CARD_LAYOUT} from '../shared/포트.js';
 import {buildSemanticReviewInput,validateSemanticReport} from '../providers/검수내용.js';
 import type * as C from '../shared/포트.js';
 import {AppErrorSchema} from '../shared/포트.js';
@@ -26,15 +27,18 @@ export const createWorker:C.CreateWorker=options=>{
  let running=false,disposed=false,busy=false,shutdownRequested=false,loop:Promise<void>|null=null,active:{abort:AbortController;done:Promise<void>}|null=null;
  let idle=Promise.resolve(),releaseIdle:()=>void=()=>{};
  const pause=()=>new Promise<void>(r=>setTimeout(r,options.pollMs??100));
+ const updateHealth=async(state:Parameters<typeof health.update>[0],reason:string|null=null,stopping=false)=>{
+  for(;;){const result=health.updateResult(state,reason);if(result==='updated'||stopping&&(result==='waiting'||result==='lost'))return;if(result!=='contended')throw Error('WORKER_UNAVAILABLE');await pause();}
+ };
  const worker:C.Worker={
-  async start(){if(disposed)throw Error('WORKER_DISPOSED');if(unavailable)throw Error('WORKER_UNAVAILABLE');if(running)return;shutdownRequested=false;running=true;loop=(async()=>{while(running){await worker.tick();if(running)await pause();}})();void loop.catch(()=>{running=false;});},
-  async tick(){if(disposed||busy||shutdownRequested||unavailable)return false;if(!health.update('ready'))return false;busy=true;idle=new Promise<void>(r=>{releaseIdle=r;});
+  async start(){if(disposed)throw Error('WORKER_DISPOSED');if(unavailable)throw Error('WORKER_UNAVAILABLE');if(running)return;try{if(health.updateResult('ready')==='lost')throw Error('WORKER_UNAVAILABLE');}catch(error){unavailable=true;throw error;}shutdownRequested=false;running=true;loop=(async()=>{while(running){await worker.tick();if(running)await pause();}})();void loop.catch(()=>{running=false;});},
+  async tick(){if(disposed||busy||shutdownRequested||unavailable)return false;const initial=health.updateResult('ready');if(initial==='lost'){unavailable=true;running=false;throw Error('WORKER_UNAVAILABLE');}if(initial!=='updated')return false;busy=true;idle=new Promise<void>(r=>{releaseIdle=r;});
    try{await store.reconcile({now:clock()});const job=await store.claimJob({ownerId:options.ownerId,now:clock(),leaseMs,dataMode:options.dataMode});if(!job)return false;
-    if(!health.update('busy'))throw Error('WORKER_UNAVAILABLE');const abort=new AbortController();if(shutdownRequested)abort.abort();const done=execute(job,abort);active={abort,done};try{await done;const completed=await store.getRun(job.run.runId);if(completed.error?.code==='CANCEL_CLEANUP_FAILED'){unavailable=true;running=false;if(!health.update('unavailable','CANCEL_CLEANUP_FAILED'))throw Error('WORKER_UNAVAILABLE');}}finally{active=null;}return true;
-   }catch(error){unavailable=true;running=false;if(!health.update('unavailable',(error as {code?:string})?.code==='CANCEL_CLEANUP_FAILED'?'CANCEL_CLEANUP_FAILED':'WORKER_UNAVAILABLE'))throw Error('WORKER_UNAVAILABLE');throw error;
-   }finally{busy=false;releaseIdle();if(!unavailable&&!health.update('ready')){unavailable=true;running=false;throw Error('WORKER_UNAVAILABLE');}}
+    await updateHealth('busy');const abort=new AbortController();if(shutdownRequested)abort.abort();const done=execute(job,abort);active={abort,done};try{await done;const completed=await store.getRun(job.run.runId);if(completed.error?.code==='CANCEL_CLEANUP_FAILED'){unavailable=true;running=false;await updateHealth('unavailable','CANCEL_CLEANUP_FAILED');}}finally{active=null;}return true;
+   }catch(error){unavailable=true;running=false;await updateHealth('unavailable',(error as {code?:string})?.code==='CANCEL_CLEANUP_FAILED'?'CANCEL_CLEANUP_FAILED':'WORKER_UNAVAILABLE');throw error;
+   }finally{try{if(!unavailable)await updateHealth('ready');}catch(error){unavailable=true;running=false;throw error;}finally{busy=false;releaseIdle();}}
   },
-  async stop(){running=false;shutdownRequested=true;active?.abort.abort();try{await idle;await active?.done;await loop;}finally{loop=null;if(!unavailable)health.update('unavailable','WORKER_UNAVAILABLE');}},
+  async stop(){running=false;shutdownRequested=true;active?.abort.abort();try{await idle;await active?.done;await loop;}finally{loop=null;if(!unavailable)await updateHealth('unavailable','WORKER_UNAVAILABLE',true);}},
   async dispose(){if(disposed)return;await worker.stop();disposed=true;}
  };return worker;
  async function execute(job:C.ClaimedJob,abort:AbortController){
@@ -43,13 +47,16 @@ export const createWorker:C.CreateWorker=options=>{
   let repairer:C.FactLinkRepairer|undefined,repairStarted=false,repairDisposed=false;
   let repairMergeFailure:'unresolvable'|'invalid'|null=null;
   let reviewer:C.SemanticReviewer|undefined,staged:Extract<C.EngineContent,{kind:'factReview'}>|undefined;
-  const disposeCollector=async()=>{if(!adapter||collectorDisposed)return;collectorDisposed=true;try{const reports=await bounded(adapter.dispose());if(job.run.kind==='factReview'&&providerStarted&&reports.length===0||reports.some(r=>!cleanupAccepted(r,fence.runId)))throw Error('CLEANUP_UNCONFIRMED');}catch{cleanupFailed=true;throw workerError('CANCEL_CLEANUP_FAILED',fence);}};
+  const revisionV2=job.run.kind==='revision'&&job.run.revisionProtocol===2&&job.revision?.scope!=='storyboard';
+  let stagedRevision:C.RevisionDecision|undefined;
+  const disposeCollector=async()=>{if(!adapter||collectorDisposed)return;collectorDisposed=true;try{const reports=await bounded(adapter.dispose());if((job.run.kind==='factReview'||revisionV2)&&providerStarted&&reports.length===0||reports.some(r=>!cleanupAccepted(r,fence.runId)))throw Error('CLEANUP_UNCONFIRMED');}catch{cleanupFailed=true;throw workerError('CANCEL_CLEANUP_FAILED',fence);}};
   const disposeReviewer=async()=>{if(!reviewer||reviewerDisposed)return;reviewerDisposed=true;try{const reports=await bounded(reviewer.dispose());if(reviewerStarted&&reports.length===0||reports.some(r=>!cleanupAccepted(r,fence.runId)))throw Error('CLEANUP_UNCONFIRMED');}catch{cleanupFailed=true;throw workerError('CANCEL_CLEANUP_FAILED',fence);}};
   const disposeRepairer=async()=>{if(!repairer||repairDisposed)return;repairDisposed=true;try{const reports=await bounded(repairer.dispose());if(repairStarted&&reports.length===0||reports.some(r=>!cleanupAccepted(r,fence.runId)))throw Error('CLEANUP_UNCONFIRMED');}catch{cleanupFailed=true;throw workerError('CANCEL_CLEANUP_FAILED',fence);}};
   const normalizeRunError=(error:unknown):C.AppError=>{
    const parsed=AppErrorSchema.safeParse(error);
    if(parsed.success&&parsed.data.code==='MODEL_UNAVAILABLE')return {...workerError('MODEL_UNAVAILABLE',fence),message:'선택한 모델을 사용할 수 없어 실행을 중단했습니다. 모델 목록과 계정 접근 권한을 확인해 주세요. 기본 모델로 전환하지 않았습니다.',retryable:false,nextActions:['contact_user']};
    const normalized=normalizeError(error,fence);
+   if(error instanceof FactLinkFailure){const diagnostic=linkDiagnostic(error);return {...normalized,message:diagnostic.message,details:{...normalized.details,reason:diagnostic.code}};}
    if(repairMergeFailure&&['FACT_SCOPE_INVALID','FACT_REVIEW_FAILED'].includes(normalized.code))return {...normalized,message:repairMergeFailure==='unresolvable'?'기존 자료에서 연결을 확정하지 못했습니다. 보완 응답은 진단용으로 보존했으며 의미 검수는 시작하지 않았습니다.':'연결 보완의 참조·출처 검증에 실패했습니다. 보완 응답은 진단용으로 보존했으며 의미 검수는 시작하지 않았습니다.'};
    return normalized;
   };
@@ -72,18 +79,25 @@ export const createWorker:C.CreateWorker=options=>{
    progress:async(c,event)=>locked(async()=>{checkContext(c);await guard();return store.appendEvent(fence,event);}),
    openQuestion:async(c,input)=>locked(async()=>{checkContext(c);await guard();const out=await store.saveQuestion(fence,input.question,input.mapping);fence=out.fence;return out.event;}),
    waitForAnswer:async(c,qid,version,signal)=>{checkContext(c);return waitForStoredAnswer({store,fence:()=>fence,adopt:next=>{fence=next;},guard,locked,pause,signal,workerSignal:abort.signal,questionId:qid,version});},
-   publishResult:async(c,content)=>{checkContext(c);await mark(c.phase,'output_observed');await mark(c.phase,'validated');if(c.phase==='factReview'){if(content.kind!=='factReview'||staged)throw workerError('PROVIDER_PROTOCOL_ERROR',fence);const {semanticReview:_ignored,...draft}=content;staged=structuredClone(draft);providerResult=true;return locked(async()=>{await guard();return store.appendEvent(fence,{type:'progress',phase:'factReview',message:'수집 근거와 수정 후보를 확인했습니다. 별도 의미 검수를 준비합니다.',completed:null,total:null,activity:{provider:'app',operation:'planning',status:'completed'}});});}const event=await commit({type:'content',content});if(!event)throw workerError('PROVIDER_PROTOCOL_ERROR',fence);providerResult=true;return event;},
+   publishResult:async(c,content)=>{checkContext(c);await mark(c.phase,'output_observed');
+    if(revisionV2){
+     if(c.phase!=='revision'||c.revisionProtocol!==2||stagedRevision||!job.revision)throw workerError('PROVIDER_PROTOCOL_ERROR',fence);
+     stagedRevision=normalizeRevisionDecision(content,job.snapshot,job.revision);await mark(c.phase,'validated');providerResult=true;
+     return locked(async()=>{await guard();return store.appendEvent(fence,{type:'progress',phase:'revision',message:'카드 수정 응답을 확인했습니다. 엔진 정리 확인 후 처리합니다.',completed:null,total:null});});
+    }
+    await mark(c.phase,'validated');if(c.phase==='factReview'){if(content.kind!=='factReview'||staged)throw workerError('PROVIDER_PROTOCOL_ERROR',fence);const {semanticReview:_ignored,...draft}=content;staged=structuredClone(draft);providerResult=true;return locked(async()=>{await guard();return store.appendEvent(fence,{type:'progress',phase:'factReview',message:'수집 근거와 수정 후보를 확인했습니다. 별도 의미 검수를 준비합니다.',completed:null,total:null,activity:{provider:'app',operation:'planning',status:'completed'}});});}const event=await commit({type:'content',content});if(!event)throw workerError('PROVIDER_PROTOCOL_ERROR',fence);providerResult=true;return event;},
    publishError:async(c,error)=>{checkContext(c);providerFailure=normalizeRunError(error);return locked(async()=>{await guard();return store.appendEvent(fence,{type:'error',error:providerFailure!});});},
    saveFactCheckpoint:async(c,write)=>locked(async()=>{checkContext(c);await guard();await store.saveFactCheckpoint(fence,write);}),
    saveSession:async(c,id)=>locked(async()=>{checkContext(c);await guard();await store.saveSession(fence,id,c.cwd);}),
    status:id=>store.getRun(id)
   };
   let monitoring=false;
-  const monitor=setInterval(()=>{if(monitoring||terminal)return;monitoring=true;void locked(async()=>{if(!health.update('busy')||await store.isCancelRequested(fence)||!await store.heartbeat(fence,{now:clock(),leaseMs}))abort.abort();}).catch(()=>abort.abort()).finally(()=>{monitoring=false;});},options.heartbeatMs??5000);
+  const monitor=setInterval(()=>{if(monitoring||terminal)return;monitoring=true;void locked(async()=>{const result=health.updateResult('busy');if(result!=='updated'&&result!=='contended'||await store.isCancelRequested(fence)||!await store.heartbeat(fence,{now:clock(),leaseMs}))abort.abort();}).catch(()=>abort.abort()).finally(()=>{monitoring=false;});},options.heartbeatMs??5000);
   try{
    await guard();
    if(job.run.kind==='research'||job.run.kind==='editorial'||job.run.kind==='revision'||job.run.kind==='factReview'){
     if(!job.context)throw workerError('PROVIDER_PROTOCOL_ERROR',fence);
+    if(revisionV2&&job.context.revisionProtocol!==2)throw workerError('PROVIDER_PROTOCOL_ERROR',fence);
     const scope=job.revision?.scope;
     const persistedRevision=canReusePersistedRevision(job);
     const renderOnly=job.run.kind==='revision'&&scope==='layout'&&job.revision?.renderOnly===true;
@@ -94,15 +108,40 @@ export const createWorker:C.CreateWorker=options=>{
      await wait((async()=>{for await(const event of adapter!.start(job.context!,job.revision?{snapshot:job.snapshot,request:job.revision}:{snapshot:job.snapshot})){validateEvent(event,fence);}})());
      if(providerFailure)throw providerFailure;if(!providerResult)throw workerError('PROVIDER_PROTOCOL_ERROR',fence);
     }
+    if(revisionV2&&!persistedRevision){
+     if(!job.revision)throw workerError('PROVIDER_PROTOCOL_ERROR',fence);
+     if(renderOnly||scope==='image'){
+      const patches:C.RevisionPatch[]=job.revision.cardIds.map(cardId=>{
+       const card=job.snapshot.result?.cards.find(card=>card.cardId===cardId);if(!card)throw workerError('PROVIDER_PROTOCOL_ERROR',fence);
+       return scope==='image'?{cardId,scope:'image',changes:{imagePlan:card.imagePlan}}:{cardId,scope:'layout',changes:structuredClone(card.layout??DEFAULT_CARD_LAYOUT)};
+      });
+      stagedRevision=normalizeRevisionDecision({kind:'revision',status:'patch',patches},job.snapshot,job.revision);
+     }
+     await disposeCollector();await guard();
+     if(!stagedRevision)throw workerError('PROVIDER_PROTOCOL_ERROR',fence);
+     await commit({type:'revision',decision:stagedRevision});
+     if(stagedRevision.status!=='patch')return;
+    }
      if(job.run.kind==='factReview'){
       if(job.factCheckpoint){
        const cp=job.factCheckpoint;
-       if(!checkpointMatches(cp,job.snapshot)||cp.requestedModel!==(job.run.requestedModel??null))throw workerError('FACT_PROPOSAL_STALE',fence);
-       const checked=prepareFactCheckpoint(cp.draft,job.snapshot,cp.receipts);
+       if(!checkpointMatches(cp,job.snapshot)||cp.requestedModel!==(job.run.requestedModel??null)||canonicalJson(cp.reviewer)!==canonicalJson(job.snapshot.factReview?.reviewer??DEFAULT_FACT_REVIEWER))throw workerError('FACT_PROPOSAL_STALE',fence);
+       let checked:C.FactCheckpointWrite;
+       try{checked=checkedWrite({step:cp.step,draft:cp.draft,receipts:cp.receipts,issues:cp.issues,...(cp.repairObservation!==undefined?{repairObservation:cp.repairObservation}:{})},job.snapshot);}catch(error){if(cp.repairObservation!==undefined)throw new FactLinkFailure('FACT_LINK_VALIDATION_FAILED');throw error;}
        if(checked.step!==cp.step)throw workerError('FACT_SCOPE_INVALID',fence);
        // Own the saved boundary on the child before any native call, including an unresolvable repair.
        await store.saveFactCheckpoint(fence,{...checked,...(cp.repairObservation?{repairObservation:cp.repairObservation}:{})});
-       if(cp.step==='links'){
+       if(cp.step==='links'&&cp.repairObservation){
+        // Reuse is local validation, not a fresh provider invocation or observation.
+        try{staged=applyFactLinkRepair(job.snapshot,cp.draft,cp.receipts,cp.repairObservation.decision);}catch(error){repairMergeFailure=cp.repairObservation.decision.status==='unresolvable'?'unresolvable':'invalid';throw error;}
+        const {observations:_observations,semanticReview:_report,...draft}=staged;
+        await locked(async()=>{
+         await guard();
+         await store.saveFactCheckpoint(fence,{...prepareFactCheckpoint(draft,job.snapshot,cp.receipts),repairObservation:cp.repairObservation});
+         await store.appendEvent(fence,{type:'progress',phase:'fact-link-repair',message:'저장된 연결 보완 응답을 재사용하여 앱 검증을 마쳤습니다. 새 보완·검색·수집 호출 없이 의미 검수만 진행합니다.',completed:null,total:null});
+        });
+        await mark('fact-link-repair','validated');
+       }else if(cp.step==='links'){
         if(!options.createFactLinkRepairer)throw workerError('FACT_REVIEW_FAILED',fence);
         const cwd=resolve(job.attemptDir,'fact-link-repair');await mkdir(cwd,{recursive:true});await mark('fact-link-repair','prepared');await guard();
         repairer=options.createFactLinkRepairer({...options.factLinkRepairerOptions,requestedModel:cp.requestedModel,livePermission:options.factLinkRepairerOptions?.livePermission??{inference:false},signal:abort.signal,clock,onProgress:async event=>{const actualModel=event.actualModel&&/^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,119}$/.test(event.actualModel)?event.actualModel:undefined;await locked(async()=>{await guard();await store.appendEvent(fence,{type:'progress',phase:'fact-link-repair',...(actualModel?{actualModel}:{}),message:event.status==='started'?'저장된 자료의 누락 연결만 보완합니다. 새 검색·수집은 하지 않습니다.':event.status==='completed'?'연결 보완 응답 수신 · 참조 검증 대기':'연결 보완 응답을 확인하지 못했습니다',completed:null,total:null,activity:{provider:'claude',operation:'planning',status:event.status}});});}});
@@ -150,6 +189,6 @@ export const createWorker:C.CreateWorker=options=>{
     if(externalOutcome==='unknown'&&!unsettled){const reports=await cancelOwned();if(reports.length&&reports.every(r=>r.runId===fence.runId&&r.status==='not_started'&&r.children.length===0))externalOutcome='not_started';}
     if(job.run.kind==='factReview'&&!cleanupFailed&&!unsettled&&(collectorDisposed||job.factCheckpoint)&&(!reviewerStarted||reviewerDisposed)&&(!repairStarted||repairDisposed))externalOutcome='known';
     const normalized=normalizeRunError(error);await commit({type:'failure',error:normalized,externalOutcome,retryAllowed:normalized.code!=='SESSION_RECOVERY_UNVERIFIED'&&normalized.code!=='CANCEL_CLEANUP_FAILED'});}catch{/* stale owner cannot overwrite */}}
-  }finally{clearInterval(monitor);abort.signal.removeEventListener('abort',onAbort);abort.abort();try{await disposeCollector();await disposeReviewer();await disposeRepairer();}catch{throw workerError('CANCEL_CLEANUP_FAILED',fence);}}
+  }finally{clearInterval(monitor);abort.signal.removeEventListener('abort',onAbort);abort.abort();try{await disposeCollector();await disposeReviewer();await disposeRepairer();}catch{throw workerError('CANCEL_CLEANUP_FAILED',fence);}if(cleanupFailed)throw workerError('CANCEL_CLEANUP_FAILED',fence);}
  }
 };

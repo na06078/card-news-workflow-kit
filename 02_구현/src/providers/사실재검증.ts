@@ -2,6 +2,7 @@ import {createHash} from 'node:crypto';
 import {FactLinkRepairDecisionSchema,FactProposalDraftSchema,FactReviewContentSchema,type ProjectSnapshot,type EngineContent} from '../shared/포트.js';
 import type {FactCheckpointWrite} from '../shared/포트.js';
 import {fail} from './오류.js';
+import {linkFailure} from './연결진단.js';
 export type FetchReceipt={toolUseId:string;requestedUrl:string;url:string;statusCode:number|null;bytes:number|null;outcome:'opened'|'blocked'|'empty'|'failed'|'unconfirmed';observedAt:string;evidenceSha256:string|null;result:string|null};
 /** result는 원문 HTML이 아닌 SDK 처리 결과. snippet으로 승격하지 않는다. */
 export function captureFetchReceipt(toolUseId:string,requestedUrl:string,output:unknown,failed:boolean,observedAt:string):FetchReceipt {
@@ -26,13 +27,34 @@ export function prepareFactCheckpoint(raw:unknown,snapshot:ProjectSnapshot,recei
 }
 export function applyFactLinkRepair(snapshot:ProjectSnapshot,raw:unknown,receipts:FetchReceipt[],decision:unknown):Extract<EngineContent,{kind:'factReview'}>{
  const cp=prepareFactCheckpoint(raw,snapshot,receipts),parsed=FactLinkRepairDecisionSchema.safeParse(decision);
- if(cp.step!=='links'||!parsed.success||parsed.data.status!=='repaired')fail('FACT_SCOPE_INVALID');
- const missing=new Set(cp.issues.flatMap(i=>i.cardIds)),covered=new Set<string>(),draft=structuredClone(cp.draft);
- for(const link of parsed.data.links){
-  const finding=draft.findings.find(f=>f.claimIndex===link.claimIndex);if(!finding)fail('FACT_SCOPE_INVALID');
-  for(const cardId of link.cardIds){if(!missing.has(cardId)||covered.has(cardId)||finding.cardIds.includes(cardId))fail('FACT_SCOPE_INVALID');finding.cardIds.push(cardId);covered.add(cardId);}
+ if(cp.step!=='links')linkFailure('FACT_LINK_VALIDATION_FAILED');
+ if(!parsed.success){
+  // Diagnose only bounded structural data; invalid output is never accepted or normalized.
+  const links=decision&&typeof decision==='object'&&'links'in decision?decision.links:null;
+  if(Array.isArray(links)&&links.length<=100){
+   const seen=new Set<string>();
+   for(const link of links)if(link&&Number.isInteger(link.claimIndex)&&Array.isArray(link.cardIds)&&link.cardIds.length<=20)for(const id of link.cardIds)if(typeof id==='string'){
+    const pair=`${link.claimIndex}:${id}`;if(seen.has(pair))linkFailure('FACT_LINK_PAIR_DUPLICATE');seen.add(pair);
+   }
+   if(links.length===0&&'status'in (decision as object)&&(decision as {status:unknown}).status==='repaired')linkFailure('FACT_LINK_COVERAGE_MISSING');
+  }
+  linkFailure('FACT_LINK_VALIDATION_FAILED');
  }
- if(covered.size!==missing.size)fail('FACT_SCOPE_INVALID');
+ if(parsed.data.status!=='repaired')linkFailure('FACT_LINK_UNRESOLVABLE');
+ const missing=new Set(cp.issues.flatMap(i=>i.cardIds)),covered=new Set<string>(),pairs=new Set<string>(),draft=structuredClone(cp.draft);
+ for(const link of parsed.data.links){
+  const finding=draft.findings.find(f=>f.claimIndex===link.claimIndex);if(!finding)linkFailure('FACT_LINK_TARGET_INVALID');
+  for(const cardId of link.cardIds){
+   const pair=`${link.claimIndex}:${cardId}`;
+   if(pairs.has(pair))linkFailure('FACT_LINK_PAIR_DUPLICATE');
+   if(!missing.has(cardId)||finding.cardIds.includes(cardId))linkFailure('FACT_LINK_TARGET_INVALID');
+   // 새 연결의 근거 참조만 제안 복사본에 보충합니다. 원고·Source 원본은 그대로 두고 아래 strict 검사를 다시 거칩니다.
+   const card=draft.cards.find(c=>c.cardId===cardId);if(!card)linkFailure('FACT_LINK_TARGET_INVALID');
+   card.sourceIds=[...new Set([...card.sourceIds,...finding.afterClaim.sourceIds])];
+   finding.cardIds.push(cardId);covered.add(cardId);pairs.add(pair);
+  }
+ }
+ if(covered.size!==missing.size)linkFailure('FACT_LINK_COVERAGE_MISSING');
  const result=validateFactReview(draft,snapshot,receipts);if(result.kind!=='factReview')fail('FACT_REVIEW_FAILED');return result;
 }
 function validate(raw:unknown,snapshot:ProjectSnapshot,receipts:FetchReceipt[],allowOrphans:boolean):EngineContent {

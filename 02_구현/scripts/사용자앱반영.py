@@ -101,21 +101,28 @@ if stop_only:
     sys.exit(0)
 conhost = Path(os.environ["SystemRoot"]) / "System32/conhost.exe"
 launched = subprocess.Popen([str(conhost), PS, "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ROOT / "scripts/사용자앱.ps1")], cwd=ROOT, close_fds=True, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
-for _ in range(40):
+for _ in range(180):
     time.sleep(0.5)
     try:
         current = json.loads(runtime_path.read_text(encoding="utf-8-sig"))
         if current["pid"] == runtime["pid"]:
             continue
+        # HTTP·프로세스 알림만으로는 작업자의 실제 health 획득을 증명하지 못합니다.
+        health = json.loads((DATA / "작업자상태.json").read_text(encoding="utf-8"))
+        checked_at = datetime.fromisoformat(health["checkedAt"])
+        worker_started_at = datetime.fromisoformat(current["worker"]["startedAt"])
+        expires_at = datetime.fromisoformat(health["expiresAt"])
+        if health["state"] != "ready" or health["reason"] is not None or checked_at < worker_started_at or expires_at <= datetime.now(timezone.utc):
+            continue
         with urllib.request.urlopen("http://127.0.0.1:5173/", timeout=1) as response:
             if response.status == 200:
                 break
-    except (OSError, ValueError):
+    except (OSError, ValueError, KeyError):
         pass
 else:
     raise RuntimeError("APP_RESTART_NOT_READY")
 after = snapshot()
-result = {"beforePids": ids, "newRuntimePid": current["pid"], "newHttpPid": current["http"]["pid"], "newWorkerPid": current["worker"]["pid"], "conhostPid": launched.pid, "http": 200, "quickCheck": after["quickCheck"], "tablesUnchanged": before["tables"] == after["tables"], "assetsUnchanged": before["assets"] == after["assets"], "active": after["active"]}
+result = {"beforePids": ids, "newRuntimePid": current["pid"], "newHttpPid": current["http"]["pid"], "newWorkerPid": current["worker"]["pid"], "conhostPid": launched.pid, "http": 200, "workerHealth": health["state"], "workerHealthCheckedAt": health["checkedAt"], "workerHealthFresh": checked_at >= worker_started_at, "quickCheck": after["quickCheck"], "tablesUnchanged": before["tables"] == after["tables"], "assetsUnchanged": before["assets"] == after["assets"], "active": after["active"]}
 save("적용후_무결성.json", after)
 save("앱반영결과.json", result)
 print(json.dumps(result), flush=True)
